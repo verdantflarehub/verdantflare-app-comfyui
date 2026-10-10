@@ -38,6 +38,7 @@ class TaskStore:
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
         with self.transaction() as db:
             db.executescript('''
+              BEGIN IMMEDIATE;
               CREATE TABLE IF NOT EXISTS instances (
                 id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
                 owner_id TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1,
@@ -54,7 +55,30 @@ class TaskStore:
                 UNIQUE(organization_id, owner_id, instance_id, project_id, idempotency_key)
               );
               CREATE INDEX IF NOT EXISTS tasks_queue ON tasks(instance_id, state, created_ns);
+              CREATE TABLE IF NOT EXISTS edit_sessions (
+                id TEXT PRIMARY KEY, instance_id TEXT NOT NULL REFERENCES instances(id),
+                organization_id TEXT NOT NULL, owner_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                revision_id TEXT NOT NULL, generation INTEGER NOT NULL, mode TEXT NOT NULL,
+                request_key TEXT NOT NULL, expires REAL NOT NULL, last_seen REAL NOT NULL,
+                closed INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(instance_id,organization_id,owner_id,project_id,request_key)
+              );
+              CREATE INDEX IF NOT EXISTS sessions_active ON edit_sessions(instance_id,closed,expires);
+              CREATE TABLE IF NOT EXISTS drafts (
+                instance_id TEXT NOT NULL REFERENCES instances(id), project_id TEXT NOT NULL,
+                revision_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
+                snapshot TEXT, sha256 TEXT,
+                PRIMARY KEY(instance_id,project_id)
+              );
+              CREATE TABLE IF NOT EXISTS draft_writes (
+                session_id TEXT NOT NULL REFERENCES edit_sessions(id), request_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL, version INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                PRIMARY KEY(session_id,request_key)
+              );
             ''')
+            instance_columns = {row[1] for row in db.execute('PRAGMA table_info(instances)')}
+            if 'worker_boot_id' not in instance_columns:
+                db.execute('ALTER TABLE instances ADD COLUMN worker_boot_id TEXT')
             columns = {row[1] for row in db.execute('PRAGMA table_info(tasks)')}
             for name, definition in [('execution', 'TEXT'), ('cancel_fence', 'INTEGER NOT NULL DEFAULT 0')]:
                 if name not in columns:
@@ -126,6 +150,12 @@ class TaskStore:
                 return self.view(row)
             if instance['draining']:
                 raise TaskError('INSTANCE_DRAINING')
+            lease_now = time.time()
+            db.execute('UPDATE edit_sessions SET closed=1 WHERE instance_id=? AND expires<=?', (instance_id, lease_now))
+            if db.execute('''SELECT 1 FROM edit_sessions WHERE instance_id=? AND project_id<>?
+                AND closed=0 AND generation=? AND expires>? LIMIT 1''',
+                (instance_id, project_id, instance['generation'], lease_now)).fetchone():
+                raise TaskError('PROJECT_BUSY')
             other = db.execute("SELECT 1 FROM tasks WHERE instance_id=? AND project_id<>? AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1", (instance_id, project_id)).fetchone()
             if other:
                 raise TaskError('PROJECT_BUSY')
@@ -287,12 +317,35 @@ class TaskStore:
 
     def worker_restarted(self, instance_id):
         with self.transaction() as db:
-            row = db.execute('SELECT generation FROM instances WHERE id=?', (instance_id,)).fetchone()
-            if not row:
-                raise TaskError('NOT_FOUND')
-            generation = row[0] + 1
-            db.execute('UPDATE instances SET generation=?,draining=1 WHERE id=?', (generation, instance_id))
-            db.execute("UPDATE tasks SET state='reconciling',error='WORKER_RESTARTED' WHERE instance_id=? AND state IN ('dispatching','running','cancelling')", (instance_id,))
-            # Pending work remains bound to its original execution generation.
-            db.execute("UPDATE tasks SET state='failed',error='STALE_GENERATION' WHERE instance_id=? AND state IN ('accepted','queued')", (instance_id,))
+            return self.restart_in_transaction(db, instance_id)
+
+    @staticmethod
+    def restart_in_transaction(db, instance_id):
+        row = db.execute('SELECT generation FROM instances WHERE id=?', (instance_id,)).fetchone()
+        if not row:
+            raise TaskError('NOT_FOUND')
+        generation = row[0] + 1
+        db.execute('UPDATE instances SET generation=?,draining=1 WHERE id=?', (generation, instance_id))
+        db.execute("UPDATE tasks SET state='reconciling',error='WORKER_RESTARTED' WHERE instance_id=? AND state IN ('dispatching','running','cancelling','reconciling')", (instance_id,))
+        db.execute("UPDATE tasks SET state='failed',error='STALE_GENERATION' WHERE instance_id=? AND state IN ('accepted','queued')", (instance_id,))
+        return generation
+
+    def observe_worker(self, instance_id, generation, boot_id):
+        try:
+            if str(uuid.UUID(boot_id, version=4)) != boot_id:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise TaskError('INVALID_WORKER_ID') from None
+        with self.transaction() as db:
+            row = db.execute('SELECT * FROM instances WHERE id=?', (instance_id,)).fetchone()
+            if not row or row['generation'] != generation:
+                raise TaskError('STALE_GENERATION')
+            if row['worker_boot_id'] == boot_id:
+                return generation
+            if row['worker_boot_id'] is None:
+                if db.execute("SELECT 1 FROM tasks WHERE instance_id=? AND state IN ('dispatching','running','cancelling','reconciling') LIMIT 1", (instance_id,)).fetchone():
+                    raise TaskError('WORKER_BINDING_REQUIRED')
+            else:
+                generation = self.restart_in_transaction(db, instance_id)
+            db.execute('UPDATE instances SET worker_boot_id=? WHERE id=?', (boot_id, instance_id))
             return generation

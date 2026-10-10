@@ -120,14 +120,21 @@ class ProjectAccess:
         self.client = JSONClient(origin)
         self.service_token, self.authority_token = service_token, authority_token
 
-    def check(self, principal, project_id, *, write=False):
+    def check(self, principal, project_id, *, write=False, revision_id=None):
         if not all(valid_id(v) for v in (principal.user_id, principal.organization_id, project_id)):
             raise Error('PERMISSION_DENIED', 403)
         rid = request_id()
-        result = self.client.request('POST', '/internal/v1/project/open', {'project_id': project_id}, {
+        request = {'project_id': project_id}
+        if revision_id is not None:
+            if not valid_id(revision_id):
+                raise Error('INVALID_ARGUMENT')
+            request['revision_id'] = revision_id
+        result = self.client.request('POST', '/internal/v1/project/open', request, {
             'Authorization': 'Bearer ' + self.service_token, 'X-User-Id': principal.user_id,
             'X-Organization-Id': principal.organization_id, 'X-Request-Id': rid})
         if result.get('project_id') != project_id or not valid_id(result.get('revision_id')):
+            raise Error('DEPENDENCY_UNAVAILABLE', 503)
+        if revision_id is not None and result['revision_id'] != revision_id:
             raise Error('DEPENDENCY_UNAVAILABLE', 503)
         if write:
             decision = self.client.request('POST', '/internal/v1/artifact/authorize', {

@@ -1,18 +1,38 @@
 """Explicitly driven native adapter; no automatic background or GPU startup.
 
-Use one adapter in the single control process. A real deployment additionally
-requires a worker boot identity fence; native ComfyUI alone cannot supply it.
+Use one adapter in the single control process and the first-party worker guard.
+Boot changes freeze dispatch; they do not authorize automatic recovery.
 """
 import re
 import threading
 import uuid
 
-from .protocol import Error, JSONClient
+from .protocol import Error, JSONClient, token_valid
+from .task_store import TaskError
 
 
 class NativeClient:
-    def __init__(self, origin, *, timeout=5):
+    def __init__(self, origin, *, token, timeout=5):
+        if not token_valid(token):
+            raise ValueError('worker credential required')
         self.client = JSONClient(origin, timeout=timeout)
+        self.token, self.boot_id = token, None
+
+    def identity(self, instance_id):
+        result = self.client.request('GET', '/vf/identity', headers={'Authorization': 'Bearer ' + self.token})
+        if (set(result) != {'protocol', 'instance_id', 'boot_id'} or type(result['protocol']) is not int
+                or result['protocol'] != 1 or result['instance_id'] != instance_id):
+            raise Error('INVALID_WORKER_IDENTITY', 503)
+        boot = self.target(result['boot_id'])
+        if uuid.UUID(boot).version != 4:
+            raise Error('INVALID_WORKER_IDENTITY', 503)
+        return boot
+
+    def request(self, method, path, value=None, *, empty=False):
+        if self.boot_id is None:
+            raise Error('WORKER_BINDING_REQUIRED', 503)
+        return self.client.request(method, path, value,
+                                   {'Authorization': 'Bearer ' + self.token, 'X-VF-Boot-Id': self.boot_id}, empty=empty)
 
     @staticmethod
     def target(prompt_id):
@@ -25,13 +45,13 @@ class NativeClient:
 
     def submit(self, task, prompt):
         pid = self.target(task['prompt_id'])
-        value = self.client.request('POST', '/prompt', {'prompt_id': pid, 'prompt': prompt})
+        value = self.request('POST', '/prompt', {'prompt_id': pid, 'prompt': prompt})
         if value.get('prompt_id') != pid or value.get('node_errors') != {}:
             raise Error('EXECUTION_UNCERTAIN', 503)
 
     def history(self, prompt_id):
         pid = self.target(prompt_id)
-        result = self.client.request('GET', '/history/' + pid)
+        result = self.request('GET', '/history/' + pid)
         if not result:
             return None
         if set(result) != {pid} or not isinstance(result[pid], dict):
@@ -40,7 +60,7 @@ class NativeClient:
 
     def position(self, prompt_id):
         pid = self.target(prompt_id)
-        queue = self.client.request('GET', '/queue')
+        queue = self.request('GET', '/queue')
         if set(queue) != {'queue_running', 'queue_pending'}:
             raise Error('INVALID_QUEUE', 503)
         found = []
@@ -60,9 +80,9 @@ class NativeClient:
     def cancel(self, prompt_id, position):
         pid = self.target(prompt_id)
         if position == 'pending':
-            self.client.request('POST', '/queue', {'delete': [pid]}, empty=True)
+            self.request('POST', '/queue', {'delete': [pid]}, empty=True)
         elif position == 'running':
-            self.client.request('POST', '/interrupt', {'prompt_id': pid}, empty=True)
+            self.request('POST', '/interrupt', {'prompt_id': pid}, empty=True)
         else:
             raise Error('EXECUTION_UNCERTAIN', 503)
 
@@ -107,6 +127,11 @@ class ExecutionAdapter:
 
     def tick(self):
         with self.lock:
+            boot = self.native.identity(self.app.instance_id)
+            observed_generation = self.store.observe_worker(self.app.instance_id, self.generation, boot)
+            if observed_generation != self.generation:
+                raise TaskError('STALE_GENERATION')
+            self.native.boot_id = boot
             task = self.store.current_execution(self.app.instance_id, self.generation)
             if task:
                 return self.reconcile(task)

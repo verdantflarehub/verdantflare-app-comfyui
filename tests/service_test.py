@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import unittest
+import uuid
 
 from app.execution import ExecutionAdapter, NativeClient
 from app.protocol import Error, JSONClient, ProjectAccess, encode, request_id
@@ -21,6 +22,7 @@ ORG, USER, PROJECT, INSTANCE, REVISION = [request_id() for _ in range(5)]
 TOKEN = 'test-only-app-token-' + 'x' * 32
 PROJECT_TOKEN = 'test-only-project-token-' + 'y' * 32
 AUTH_TOKEN = 'test-only-authority-token-' + 'z' * 32
+WORKER_TOKEN = 'test-only-worker-token-' + 'w' * 32
 ACTOR = Principal(ORG, USER)
 
 
@@ -37,11 +39,22 @@ class Backend:
         self.queue = {'queue_running': [], 'queue_pending': []}
         self.prompt = None
         self.on_submit = None
+        self.boot_id = str(uuid.uuid4())
+        self.on_queue = None
 
     def handle(self, method, path, headers, body):
         self.calls.append((method, path, dict(headers), deepcopy(body)))
         if self.unavailable:
             return 503, {'private_upstream_detail': 'never return this'}
+        if path == '/vf/identity':
+            if headers.get('Authorization') != 'Bearer ' + WORKER_TOKEN:
+                return 401, {}
+            return 200, {'protocol': 1, 'instance_id': INSTANCE, 'boot_id': self.boot_id}
+        if path in ('/prompt', '/queue', '/interrupt') or path.startswith('/history/'):
+            if headers.get('Authorization') != 'Bearer ' + WORKER_TOKEN:
+                return 401, {}
+            if headers.get('X-VF-Boot-Id') != self.boot_id:
+                return 409, {}
         if path == '/internal/v1/project/open':
             if headers.get('Authorization') != 'Bearer ' + PROJECT_TOKEN or headers.get('X-User-Id') != USER:
                 return 403, {}
@@ -64,6 +77,8 @@ class Backend:
             pid = path.rsplit('/', 1)[1]
             return 200, {pid: self.history[pid]} if pid in self.history else {}
         if path == '/queue' and method == 'GET':
+            if self.on_queue:
+                self.on_queue()
             return 200, self.queue
         if path in ('/interrupt', '/queue') and method == 'POST':
             if self.lost_cancel:
@@ -151,7 +166,7 @@ class ServiceTest(unittest.TestCase):
                                project_access=self.access, policy=self.policy)
         self.server = Server(('127.0.0.1', 0), self.app, TOKEN)
         serve(self, self.server)
-        self.native = NativeClient(self.origin)
+        self.native = NativeClient(self.origin, token=WORKER_TOKEN)
         self.engine = ExecutionAdapter(self.app, self.native, 1)
 
     def call(self, name, arguments, *, mcp=False, headers=None, raw=None, path=None):
@@ -302,7 +317,7 @@ class ServiceTest(unittest.TestCase):
         task = self.submit()
         self.backend.lost_submit = True
         self.assertEqual(self.engine.tick()['state'], 'reconciling')
-        restarted = ExecutionAdapter(self.app, NativeClient(self.origin), 1)
+        restarted = ExecutionAdapter(self.app, NativeClient(self.origin, token=WORKER_TOKEN), 1)
         self.assertEqual(restarted.tick()['state'], 'running')
         self.complete(task)
         result = restarted.tick()
@@ -399,7 +414,7 @@ class ServiceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn('result', value)
             if method == 'tools/list':
-                self.assertEqual(len(value['result']['tools']), 5)
+                self.assertEqual(len(value['result']['tools']), 10)
         status, _ = self.call('', {}, mcp=True, raw=encode({'jsonrpc': '2.0', 'method': 'notifications/initialized'}))
         self.assertEqual(status, 202)
         status, _ = self.call('', {}, mcp=True, raw=encode({'jsonrpc': '2.0', 'method': 'tools/call', 'params': {'name': 'task.submit'}}))
@@ -458,6 +473,68 @@ class ServiceTest(unittest.TestCase):
                              (self.store.fail, ('NATIVE_EXECUTION_FAILED',))]:
             with self.assertRaisesRegex(TaskError, 'CANCEL_UNCERTAIN'):
                 method(task['task_id'], 1, *args)
+
+    def test_editing_http_mcp_share_lease_and_preserve_local_draft(self):
+        args = {'project_id': PROJECT, 'base_revision_id': REVISION, 'mode': 'edit', 'idempotency_key': 'editor-open-1'}
+        status, session = self.call('session.open', args)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call('session.open', {**args, 'idempotency_key': 'editor-open-2'})[0], 409)
+        params = {'project_id': PROJECT, 'session_id': session['session_id']}
+        draft = {'workflow': {'nodes': []}, 'prompt': {}, 'dependencies': [], 'inputs': []}
+        status, updated = self.call('workflow.update', {**params, 'expected_version': 0, 'idempotency_key': 'draft-write-1', 'snapshot': draft}, mcp=True)
+        self.assertEqual(status, 200)
+        self.assertFalse(updated['result']['isError'])
+        status, value = self.call('workflow.get', params)
+        self.assertEqual(value['snapshot'], draft)
+        self.assertFalse(value['saved_to_project'])
+        self.assertEqual(self.call('session.close', params)[0], 200)
+        status, session = self.call('session.open', {**args, 'idempotency_key': 'editor-open-2'})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call('workflow.get', {'project_id': PROJECT, 'session_id': session['session_id']})[1]['version'], 1)
+
+    def test_revoked_writer_cannot_renew_or_update_but_can_read_and_close(self):
+        args = {'project_id': PROJECT, 'base_revision_id': REVISION, 'mode': 'edit', 'idempotency_key': 'editor-open-1'}
+        _, session = self.call('session.open', args)
+        params = {'project_id': PROJECT, 'session_id': session['session_id']}
+        self.backend.write_allowed = False
+        self.assertEqual(self.call('session.renew', params)[0], 403)
+        self.assertEqual(self.call('workflow.update', {**params, 'expected_version': 0, 'idempotency_key': 'draft-write-1', 'snapshot': snapshot(self.model)})[0], 403)
+        self.assertEqual(self.call('workflow.get', params)[0], 200)
+        self.assertEqual(self.call('session.close', params)[0], 200)
+        status, reader = self.call('session.open', {**args, 'mode': 'read', 'idempotency_key': 'reader-open-1'})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.call('session.renew', {'project_id': PROJECT, 'session_id': reader['session_id']})[0], 200)
+
+    def test_actual_worker_boot_change_invalidates_lease_and_old_tasks(self):
+        task = self.submit()
+        second = self.submit('test-key-2')
+        _, session = self.call('session.open', {'project_id': PROJECT, 'base_revision_id': REVISION, 'mode': 'edit', 'idempotency_key': 'editor-open-1'})
+        self.engine.tick()
+        self.backend.boot_id = str(uuid.uuid4())
+        with self.assertRaisesRegex(TaskError, 'STALE_GENERATION'):
+            self.engine.tick()
+        self.assertEqual(self.store.inspect(task['task_id'])['state'], 'reconciling')
+        self.assertEqual(self.store.inspect(second['task_id'])['error'], 'STALE_GENERATION')
+        status, result = self.call('session.renew', {'project_id': PROJECT, 'session_id': session['session_id']})
+        self.assertEqual((status, result['code']), (409, 'STALE_GENERATION'))
+        self.assertEqual(sum(c[1] == '/prompt' for c in self.backend.calls), 1)
+
+    def test_restart_between_identity_probe_and_submit_rejects_old_request(self):
+        task = self.submit()
+        self.backend.on_queue = lambda: setattr(self.backend, 'boot_id', str(uuid.uuid4()))
+        self.assertEqual(self.engine.tick()['state'], 'reconciling')
+        self.assertIsNone(self.backend.prompt)
+        self.backend.on_queue = None
+        with self.assertRaisesRegex(TaskError, 'STALE_GENERATION'):
+            self.engine.tick()
+        self.assertEqual(self.store.inspect(task['task_id'])['error'], 'WORKER_RESTARTED')
+
+    def test_existing_unbound_native_execution_is_not_silently_adopted(self):
+        self.submit()
+        self.store.claim_next(INSTANCE, 1)
+        with self.assertRaisesRegex(TaskError, 'WORKER_BINDING_REQUIRED'):
+            self.engine.tick()
+        self.assertIsNone(self.backend.prompt)
 
 
 if __name__ == '__main__':

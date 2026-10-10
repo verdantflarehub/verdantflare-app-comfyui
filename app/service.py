@@ -7,6 +7,7 @@ import re
 from jsonschema import Draft202012Validator
 
 from .protocol import Error, valid_id
+from .editing import Editing
 from .task_store import TaskError, canonical
 
 CONTRACT = json.loads(Path(__file__).with_name('generated_tools.json').read_text(encoding='utf-8'))
@@ -21,6 +22,7 @@ class Application:
         self.store, self.alias, self.instance_id = store, alias, instance_id
         self.principal, self.project_access, self.policy = principal, project_access, policy
         store.register_instance(instance_id, principal)
+        self.editing = Editing(store)
 
     def authorize_instance(self, alias, principal):
         if alias != self.alias or principal != self.principal:
@@ -57,6 +59,8 @@ class Application:
                         'generation_ready': self.policy.ready, 'automatic_dispatch': False,
                         'artifact_collection': False, 'tools': list(VALIDATORS)}
             project = arguments['project_id']
+            if name in {'session.open', 'session.renew', 'session.close', 'workflow.get', 'workflow.update'}:
+                return self.edit(principal, name, arguments)
             task = None
             if name in ('task.get', 'task.cancel'):
                 task = self.store.get(principal, arguments['task_id'], project)
@@ -87,3 +91,17 @@ class Application:
             raise Error(code, 404 if code == 'NOT_FOUND' else 409) from None
         except (ValueError, TypeError, RecursionError):
             raise Error('INVALID_ARGUMENT') from None
+
+    def edit(self, principal, name, args):
+        project = args['project_id']
+        if name == 'session.open':
+            self.project_access.check(principal, project, write=args['mode'] == 'edit', revision_id=args['base_revision_id'])
+            return self.editing.open(principal, self.instance_id, project, args['base_revision_id'], args['mode'], args['idempotency_key'])
+        sid = args['session_id']
+        info = self.editing.info(principal, self.instance_id, project, sid, live=name != 'session.close')
+        writing = name == 'workflow.update' or name == 'session.renew' and info['mode'] == 'edit'
+        self.project_access.check(principal, project, write=writing, revision_id=info['base_revision_id'])
+        methods = {'session.renew': self.editing.renew, 'session.close': self.editing.close, 'workflow.get': self.editing.get}
+        if name in methods:
+            return methods[name](principal, self.instance_id, project, sid)
+        return self.editing.update(principal, self.instance_id, project, sid, args['expected_version'], args['idempotency_key'], args['snapshot'])
