@@ -1,0 +1,17 @@
+{
+  "comfyui": {
+    "repository": "https://github.com/Comfy-Org/ComfyUI",
+    "version": "0.32.0",
+    "revision": "c2bcbecd82ec5ae66594340b395c24ef0217b238"
+  },
+  "frontend": {
+    "repository": "https://github.com/Comfy-Org/ComfyUI_frontend",
+    "version": "1.48.7",
+    "revision": "6d6af63c00f132cd25dc29307fc56bd2c094fa22",
+    "filename": "comfyui_frontend_package-1.48.7-py3-none-any.whl",
+    "url": "https://files.pythonhosted.org/packages/fd/77/f6e2aea61ed41b6e4e9211a0354a947a1504d52982e401d1897f63024dfe/comfyui_frontend_package-1.48.7-py3-none-any.whl",
+    "sha256": "f193369c4248bffe0b150dca9cba5e82f7c3add6645991377a992d5036aea8e7",
+    "size": 22131689,
+    "license": "GPL-3.0-only"
+  }
+}

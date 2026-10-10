@@ -1,0 +1,1 @@
+"""ComfyUI application integration primitives."""
