@@ -55,7 +55,10 @@ def main():
     root = args.comfy_root.resolve(strict=True)
     if not (root / 'main.py').is_file() or not (root / 'server.py').is_file():
         raise ValueError('ComfyUI checkout required')
-    guard = Guard(os.environ['COMFYUI_INSTANCE_ID'], os.environ['COMFYUI_WORKER_TOKEN'])
+    binding = {key: os.environ.get(env, '') for key, env in (
+        ('pod_uid', 'COMFYUI_POD_UID'), ('namespace', 'COMFYUI_POD_NAMESPACE'),
+        ('pod_name', 'COMFYUI_POD_NAME'), ('container', 'COMFYUI_CONTAINER_NAME'))}
+    guard = Guard(os.environ['COMFYUI_INSTANCE_ID'], os.environ['COMFYUI_WORKER_TOKEN'], binding)
     remaining = remaining[1:] if remaining[:1] == ['--'] else remaining
     if any(arg.split('=', 1)[0] in {'--whitelist-custom-nodes', '--enable-manager'} for arg in remaining):
         raise ValueError('custom nodes and online manager are not supported')

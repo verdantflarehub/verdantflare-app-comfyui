@@ -1,0 +1,9 @@
+--- a/src/stores/appModeStore.ts
++++ b/src/stores/appModeStore.ts
+@@
+   useEventListener(
+-    () => app.rootGraph?.events,
++    () => app.isGraphReady ? app.rootGraph.events : undefined,
+     'configured',
+     resetSelectedToWorkflow
+   )

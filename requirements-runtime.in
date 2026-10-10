@@ -1,0 +1,39 @@
+# Pinned upstream requirements; Linux CUDA wheels are fixed explicitly.
+-r requirements.txt
+comfyui-frontend-package==1.48.7
+comfyui-workflow-templates==0.11.39
+comfyui-embedded-docs==0.5.9
+torch @ https://download-r2.pytorch.org/whl/cu130/torch-2.14.1%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=5359b255ac68c0cabb8293952b38e00f0d1a570815cd87f19b61af702c071410
+torchsde
+torchvision @ https://download-r2.pytorch.org/whl/cu130/torchvision-0.29.1%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ce6b51d5ffad41eb1d22ff61cb304415a95c1bfa431dc00a80c8ece06822c3b7
+torchaudio @ https://download-r2.pytorch.org/whl/cu130/torchaudio-2.11.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=3fba988f4301fe13547fe5e99c76d9ae36a27e19ded82eeffed9d2456e12edef
+numpy>=1.25.0
+einops
+transformers>=4.50.3
+tokenizers>=0.13.3
+sentencepiece
+safetensors>=0.4.2
+aiohttp>=3.11.8
+yarl>=1.18.0
+pyyaml
+Pillow
+scipy
+tqdm
+psutil
+alembic
+SQLAlchemy>=2.0.0
+filelock
+av>=16.0.0
+comfy-kitchen==0.2.30
+comfy-aimdo==0.4.13
+requests
+simpleeval>=1.0.0
+blake3
+
+#non essential dependencies:
+kornia>=0.7.1
+spandrel
+pydantic~=2.0
+pydantic-settings~=2.0
+PyOpenGL>=3.1.8
+comfy-angle

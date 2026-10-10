@@ -10,9 +10,17 @@ test('metadata and scoped listing requests are admitted without client identity 
   }
   assert.throws(() => validateRequest({ ...get('/users'), headers: { Authorization: 'untrusted' } }));
 });
-test('all execution/global-mutation requests are denied in the read-only slice', () => {
-  for (const path of ['/prompt', '/queue', '/history', '/interrupt', '/free', '/users', '/settings', '/manager/install']) {
+test('execution and global-mutation requests are denied in the base editor', () => {
+  for (const path of ['/prompt', '/queue', '/history', '/interrupt', '/free', '/users', '/manager/install']) {
     assert.throws(() => validateRequest({ method: 'POST', path, body: '{}' }));
+  }
+});
+test('only scoped JSON profiles may be written, never scripts or traversal paths', () => {
+  for (const path of ['/api/settings/Comfy.Locale', '/api/userdata/workflows%2Fempty.json?overwrite=true']) {
+    assert.equal(validateRequest({method:'POST',path,body:'{}'}).method,'POST');
+  }
+  for (const path of ['/api/userdata/user.css','/api/userdata/..%2Fother.json','/api/userdata/%252e%252e%252fother.json']) {
+    assert.throws(()=>validateRequest({method:'POST',path,body:'{}'}));
   }
 });
 test('path normalization, traversal, authorities and unsupported queries are rejected', () => {

@@ -1,0 +1,39 @@
+# Pinned upstream requirements; Linux CPU wheels for C7 editor acceptance.
+-r requirements.txt
+comfyui-frontend-package==1.48.7
+comfyui-workflow-templates==0.11.39
+comfyui-embedded-docs==0.5.9
+torch @ https://download.pytorch.org/whl/cpu/torch-2.14.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=5a6363570c753812540a05eb82380e329469cbe668643e88111414c12627711f
+torchsde
+torchvision @ https://download.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ef220d4b21878c58947851beb7337382897159105f012f0c9c07bf7e84174d7e
+torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=2354248848d06a9ae1e7a12165f800f0dda7df60ecac9fca892322b722b922c0
+numpy>=1.25.0
+einops
+transformers>=4.50.3
+tokenizers>=0.13.3
+sentencepiece
+safetensors>=0.4.2
+aiohttp>=3.11.8
+yarl>=1.18.0
+pyyaml
+Pillow
+scipy
+tqdm
+psutil
+alembic
+SQLAlchemy>=2.0.0
+filelock
+av>=16.0.0
+comfy-kitchen==0.2.30
+comfy-aimdo==0.4.13
+requests
+simpleeval>=1.0.0
+blake3
+
+#non essential dependencies:
+kornia>=0.7.1
+spandrel
+pydantic~=2.0
+pydantic-settings~=2.0
+PyOpenGL>=3.1.8
+comfy-angle

@@ -82,10 +82,11 @@ class JSONClient:
         self.origin, self.timeout, self.max_bytes = origin.rstrip('/'), timeout, max_bytes
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, method, path, value=None, headers=None, *, empty=False):
+    def request(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False):
         if not path.startswith('/') or path.startswith('//') or any(c in path for c in '?%#\\\r\n'):
             raise Error('INVALID_INTERNAL_PATH')
-        request = urllib.request.Request(self.origin + path, method=method,
+        suffix = '?' + urllib.parse.urlencode(query) if query else ''
+        request = urllib.request.Request(self.origin + path + suffix, method=method,
                                         data=encode(value) if value is not None else None,
                                         headers={'Content-Type': 'application/json', **(headers or {})})
         try:
@@ -101,12 +102,14 @@ class JSONClient:
                     result = decode(raw)
                 except Error:
                     raise Error('DEPENDENCY_UNAVAILABLE', 503) from None
-                if not isinstance(result, dict):
+                if object_only and not isinstance(result, dict):
                     raise Error('DEPENDENCY_UNAVAILABLE', 503)
                 return result
         except urllib.error.HTTPError as exc:
             status = exc.code
             exc.close()
+            if status == 404 and not_found:
+                raise Error('NOT_FOUND', 404) from None
             raise Error('PERMISSION_DENIED' if status in (401, 403) else 'DEPENDENCY_UNAVAILABLE',
                         403 if status in (401, 403) else 503) from None
         except (OSError, http.client.HTTPException, ValueError):

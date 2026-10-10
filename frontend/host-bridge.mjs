@@ -1,6 +1,6 @@
 import { boundedJSON, validateRequest } from './bridge-policy.mjs';
 
-export function attachHostBridge(frame, { request, subscribe, onEvent = () => {}, onRejected = () => {}, epoch = crypto.randomUUID() }) {
+export function attachHostBridge(frame, { request, subscribe, initialWorkflow = null, onEvent = () => {}, onRejected = () => {}, epoch = crypto.randomUUID() }) {
   const channel = new MessageChannel();
   const seen = new Set();
   let active = true;
@@ -21,7 +21,7 @@ export function attachHostBridge(frame, { request, subscribe, onEvent = () => {}
     if (data.kind === 'event') {
       if (data.type === 'resize' && (!Number.isFinite(data.height) || data.height < 1 || data.height > 100000)) return;
       if (data.type === 'wheel' && (!Number.isFinite(data.deltaY) || Math.abs(data.deltaY) > 10000 || ![0, 1, 2].includes(data.deltaMode))) return;
-      if (['ready', 'resize', 'wheel', 'error'].includes(data.type)) onEvent(data);
+      if (['ready', 'resize', 'wheel', 'error', 'editing'].includes(data.type)) onEvent(data);
       return;
     }
     if (data.kind === 'subscribe') {
@@ -46,7 +46,7 @@ export function attachHostBridge(frame, { request, subscribe, onEvent = () => {}
   };
   channel.port1.start();
   // The target is this exact WindowProxy; the sandbox has an opaque origin.
-  frame.contentWindow.postMessage({ channel: 'vf-comfyui', kind: 'init', epoch }, '*', [channel.port2]);
+  frame.contentWindow.postMessage(boundedJSON({ channel: 'vf-comfyui', kind: 'init', epoch, initialWorkflow }), '*', [channel.port2]);
   function dispose() {
     if (!active) return;
     active = false;

@@ -19,7 +19,7 @@
       getItem(k) { return entries.get(String(k)) ?? null; },
       setItem(k, v) {
         k = String(k); v = String(v);
-        if (v.length > 262144 || (!entries.has(k) && entries.size >= 128)) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+        if (new TextEncoder().encode(v).byteLength > (k === 'workflow' ? MAX_BODY : 262144) || (!entries.has(k) && entries.size >= 128)) throw new DOMException('Quota exceeded', 'QuotaExceededError');
         entries.set(k, v);
       },
       removeItem(k) { entries.delete(String(k)); },
@@ -28,9 +28,50 @@
   }
   Object.defineProperty(window, 'sessionStorage', { value: memoryStorage() });
   Object.defineProperty(window, 'localStorage', { value: memoryStorage() });
+  // The base application starts empty. Seed only the temporary sandbox storage;
+  // a restored graph supplied by the host still takes precedence after startup.
+  localStorage.setItem('workflow', JSON.stringify({last_node_id: 0, last_link_id: 0,
+    nodes: [], links: [], groups: [], config: {}, extra: {}, version: 0.4}));
   // A sandboxed child has no cookies. Do not grant access to the host cookie jar.
   Object.defineProperty(document, 'cookie', { get: () => '', set: () => {} });
   const base = location.pathname.slice(0, location.pathname.lastIndexOf('/'));
+  // Upstream favicons use root-relative paths; keep them inside the pinned static prefix.
+  const linkHref = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, 'href');
+  const assetURL = value => typeof value === 'string' && value.startsWith('/assets/') ? base + value : value;
+  Object.defineProperty(HTMLLinkElement.prototype, 'href', {...linkHref, set(value) { linkHref.set.call(this, assetURL(value)); }});
+  const linkAttribute = HTMLLinkElement.prototype.setAttribute;
+  HTMLLinkElement.prototype.setAttribute = function(name, value) { return linkAttribute.call(this, name, name.toLowerCase() === 'href' ? assetURL(value) : value); };
+  // Browser autofocus is forbidden in an opaque child. Focus a newly opened
+  // control only while this child already owns focus from the user's action.
+  for (const Control of [HTMLInputElement, HTMLTextAreaElement, HTMLButtonElement, HTMLSelectElement]) {
+    const setAttribute = Control.prototype.setAttribute;
+    Object.defineProperty(Control.prototype, 'autofocus', {
+      get() { return this.hasAttribute('data-vf-autofocus'); },
+      set(value) {
+        this.removeAttribute('autofocus');
+        if (!value) { this.removeAttribute('data-vf-autofocus'); return; }
+        setAttribute.call(this, 'data-vf-autofocus', '');
+        requestAnimationFrame(() => { if (this.isConnected && document.hasFocus()) this.focus({preventScroll:true}); });
+      }
+    });
+    Control.prototype.setAttribute = function(name, value) {
+      if (name.toLowerCase() === 'autofocus') { this.autofocus = true; return; }
+      return setAttribute.call(this,name,value);
+    };
+  }
+  // LiteGraph also creates dialogs from HTML strings. Remove autofocus while
+  // the fragment is still detached, before Chromium queues forbidden focus.
+  const innerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+  Object.defineProperty(Element.prototype, 'innerHTML', {...innerHTML, set(value) {
+    if (typeof value !== 'string' || !/\bautofocus\b/i.test(value)) return innerHTML.set.call(this,value);
+    const template = document.createElement('template');
+    innerHTML.set.call(template,value);
+    for (const control of template.content.querySelectorAll('[autofocus]')) {
+      control.removeAttribute('autofocus'); control.setAttribute('data-vf-autofocus','');
+    }
+    innerHTML.set.call(this,innerHTML.get.call(template));
+    requestAnimationFrame(()=>{if(this.isConnected && document.hasFocus()) this.querySelector('[data-vf-autofocus]')?.focus({preventScroll:true});});
+  }});
   const nativeFetch = window.fetch.bind(window);
   window.fetch = async (input, options = {}) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, location.href);
@@ -105,6 +146,9 @@
     if (port || event.source !== parent || event.origin !== expectedOrigin || event.data?.channel !== 'vf-comfyui' ||
         event.data.kind !== 'init' || typeof event.data.epoch !== 'string' || event.ports.length !== 1) return;
     port = event.ports[0]; epoch = event.data.epoch;
+    const initial = event.data.initialWorkflow;
+    if (initial && Array.isArray(initial.nodes) && Array.isArray(initial.links) && initial.nodes.length <= 512
+        && new TextEncoder().encode(JSON.stringify(initial)).byteLength <= MAX_BODY) localStorage.setItem('workflow', JSON.stringify(initial));
     port.onmessage = async ({ data }) => {
       if (!data || data.epoch !== epoch) return;
       if (data.kind === 'response') {
@@ -117,7 +161,9 @@
         for (const socket of sockets) socket.emit('message', new MessageEvent('message', { data: JSON.stringify(data.payload) }));
       } else if (data.kind === 'theme' && ['light', 'dark'].includes(data.theme)) {
         document.documentElement.dataset.theme = data.theme;
-        document.body?.classList.toggle('dark-theme', data.theme === 'dark');
+        if (window.app?.isGraphReady && window.app.ui?.settings) {
+          await window.app.ui.settings.setSettingValue('Comfy.ColorPalette', data.theme);
+        }
       } else if (data.kind === 'workflow' && typeof data.id === 'string') {
         try {
           if (!window.app?.canvas) throw Error('EDITOR_NOT_READY');
@@ -146,10 +192,30 @@
   document.addEventListener('DOMContentLoaded', () => {
     document.documentElement.dataset.embedded = 'true';
     document.body.dataset.embedded = 'true';
+    // Notify the host before a user action can change the graph. The host keeps
+    // its unload warning until a snapshot taken after the action is persisted.
+    for (const type of ['pointerdown', 'pointerup', 'keydown', 'keyup', 'input', 'change', 'drop']) {
+      document.addEventListener(type, event => {
+        if (event.isTrusted) send({kind: 'event', type: 'editing'});
+      }, {capture: true, passive: true});
+    }
     new ResizeObserver(() => send({ kind: 'event', type: 'resize', height: document.documentElement.scrollHeight })).observe(document.body);
-    document.addEventListener('wheel', event => { event.preventDefault(); event.stopImmediatePropagation(); send({ kind: 'event', type: 'wheel', deltaY: event.deltaY, deltaMode: event.deltaMode }); }, { capture: true, passive: false });
+    document.addEventListener('wheel', event => {
+      // Keep official canvas zoom and scrolling inside native lists/dialogs.
+      // Only unused page scrolling crosses the opaque iframe boundary.
+      if (event.target instanceof Element && event.target.closest('#graph-canvas')) return;
+      for (let node = event.target instanceof Element ? event.target : null;
+           node && node !== document.body; node = node.parentElement) {
+        const overflow = getComputedStyle(node).overflowY;
+        if (['auto', 'scroll'].includes(overflow) && node.scrollHeight > node.clientHeight + 1 &&
+            ((event.deltaY > 0 && node.scrollTop + node.clientHeight < node.scrollHeight - 1) ||
+             (event.deltaY < 0 && node.scrollTop > 0))) return;
+      }
+      event.preventDefault(); event.stopImmediatePropagation();
+      send({ kind: 'event', type: 'wheel', deltaY: event.deltaY, deltaMode: event.deltaMode });
+    }, { capture: true, passive: false });
     const timer = setInterval(() => {
-      if (port && window.app?.canvas && document.querySelector('canvas')) {
+      if (port && window.app?.isGraphReady && window.app?.canvas && !window.app.configuringGraph && document.querySelector('canvas')) {
         clearInterval(timer); send({ kind: 'event', type: 'ready' });
       }
     }, 100);

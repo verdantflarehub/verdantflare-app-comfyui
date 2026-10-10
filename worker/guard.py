@@ -39,12 +39,13 @@ def prompt_id(value):
 
 
 class Guard:
-    def __init__(self, instance_id, token):
+    def __init__(self, instance_id, token, resource_binding=None):
         if not valid_id(instance_id) or not token_valid(token):
             raise ValueError('valid worker identity and internal credential required')
         self.instance_id, self.token = instance_id, token
         self.boot_id = str(uuid.uuid4())
         self.seen = set()
+        self.resource_binding = dict(resource_binding) if resource_binding else None
 
     def install(self, app):
         if app.frozen or any(getattr(item, '__self__', None) is self for item in app.middlewares):
@@ -60,7 +61,12 @@ class Guard:
         values = request.headers.getall('Authorization', [])
         if len(values) != 1 or not hmac.compare_digest(values[0].encode(), ('Bearer ' + self.token).encode()):
             return self.reject('UNAUTHENTICATED', 401)
-        if request.raw_path != request.path or request.query_string or request.headers.get('Content-Encoding'):
+        editor_jobs = request.method == 'GET' and request.path == '/api/jobs' and request.headers.getall('X-VF-Editor', []) == ['1']
+        if (request.raw_path.split('?', 1)[0] != request.path or (request.query_string and not editor_jobs)
+                or request.headers.get('Content-Encoding')):
+            return self.reject('INVALID_REQUEST', 400)
+        if editor_jobs and (set(request.query) - {'limit', 'offset', 'status', 'sort_by', 'sort_order'}
+                            or any(len(request.query.getall(key)) != 1 or len(request.query[key]) > 256 for key in request.query)):
             return self.reject('INVALID_REQUEST', 400)
         if request.method == 'GET' and request.path == '/vf/identity':
             return web.json_response({'protocol': 1, 'instance_id': self.instance_id, 'boot_id': self.boot_id},
@@ -68,6 +74,17 @@ class Guard:
         boots = request.headers.getall('X-VF-Boot-Id', [])
         if boots != [self.boot_id]:
             return self.reject('STALE_WORKER', 409)
+        if request.method == 'GET' and request.path == '/vf/status':
+            return web.json_response({'protocol': 1, 'instance_id': self.instance_id, 'boot_id': self.boot_id,
+                                      'resource_binding': self.resource_binding}, headers={'Cache-Control': 'no-store'})
+        editor_headers = request.headers.getall('X-VF-Editor', [])
+        if editor_headers and (editor_headers != ['1'] or request.method != 'GET'):
+            return self.reject('EDITOR_OPERATION_DENIED', 403)
+        if request.method == 'GET' and request.headers.getall('X-VF-Editor', []) == ['1']:
+            metadata = {'/features', '/object_info', '/system_stats', '/extensions', '/embeddings', '/models',
+                        '/prompt', '/workflow_templates', '/experiment/models', '/api/jobs', '/api/feature_flags', '/ws'}
+            if request.path in metadata or re.fullmatch(r'/(models|object_info)/[A-Za-z0-9_.-]{1,96}', request.path):
+                return await handler(request)
         if request.method == 'GET':
             if request.path == '/queue' or request.path.startswith('/history/') and prompt_id(request.path[9:]):
                 return await handler(request)

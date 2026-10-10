@@ -26,6 +26,12 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         self.received = []
 
         async def handler(request):
+            if request.path == '/ws':
+                socket = web.WebSocketResponse()
+                await socket.prepare(request)
+                await socket.send_json({'type': 'status', 'data': {'status': {'exec_info': {'queue_remaining': 0}}}})
+                await socket.close()
+                return socket
             value = await request.json() if request.method == 'POST' else None
             self.received.append((request.path, value))
             await asyncio.sleep(0)
@@ -45,6 +51,33 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
     def headers(self, boot=None):
         return {'Authorization': 'Bearer ' + TOKEN, 'X-VF-Boot-Id': boot or self.guard.boot_id}
 
+    async def test_editor_metadata_and_socket_require_purpose_and_current_boot(self):
+        for path in ('/object_info', '/models/checkpoints', '/ws'):
+            response = await self.client.get(path, headers=self.headers())
+            self.assertEqual(response.status, 404)
+            response = await self.client.get(path, headers={**self.headers(str(uuid.uuid4())), 'X-VF-Editor': '1'})
+            self.assertEqual(response.status, 409)
+        headers = {**self.headers(), 'X-VF-Editor': '1'}
+        response = await self.client.get('/object_info', headers=headers)
+        self.assertEqual(response.status, 200)
+        async with self.client.ws_connect('/ws', headers=headers) as socket:
+            self.assertEqual((await socket.receive_json())['type'], 'status')
+        response = await self.client.post('/prompt', headers=headers,
+                                          json={'prompt_id': str(uuid.uuid4()), 'prompt': {'1': {}}})
+        self.assertEqual(response.status, 403)
+        self.assertEqual(self.received, [('/object_info', None)])
+
+    async def test_editor_jobs_query_is_narrow_and_unambiguous(self):
+        headers = {**self.headers(), 'X-VF-Editor': '1'}
+        response = await self.client.get('/api/jobs?limit=20&offset=0&sort_order=desc', headers=headers)
+        self.assertEqual(response.status, 200)
+        for path in ('/api/jobs?limit=1&limit=2', '/api/jobs?target=other', '/object_info?limit=1', '/ws?token=value'):
+            response = await self.client.get(path, headers=headers)
+            self.assertEqual(response.status, 400)
+        response = await self.client.get('/api/jobs?limit=20', headers=self.headers())
+        self.assertEqual(response.status, 400)
+        self.assertEqual(len(self.received), 1)
+
     async def test_identity_requires_internal_credential_and_matches_process(self):
         response = await self.client.get('/vf/identity')
         self.assertEqual(response.status, 401)
@@ -61,6 +94,17 @@ class GuardTest(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/prompt', json=body, headers=self.headers())
         self.assertEqual(response.status, 200)
         self.assertEqual(self.received, [('/prompt', body)])
+
+    async def test_resource_binding_is_internal_and_boot_scoped(self):
+        self.guard.resource_binding = {'pod_uid': str(uuid.uuid4()), 'namespace': 'test', 'pod_name': 'worker', 'container': 'comfyui'}
+        for headers, status in [({}, 401), (self.headers(str(uuid.uuid4())), 409), (self.headers(), 200)]:
+            response = await self.client.get('/vf/status', headers=headers)
+            self.assertEqual(response.status, status)
+            if status == 200:
+                value = await response.json()
+                self.assertEqual(value['resource_binding'], self.guard.resource_binding)
+                self.assertEqual(value['boot_id'], self.guard.boot_id)
+        self.assertEqual(self.received, [])
 
     async def test_simultaneous_same_prompt_is_admitted_only_once(self):
         body = {'prompt_id': str(uuid.uuid4()), 'prompt': {'1': {}}}

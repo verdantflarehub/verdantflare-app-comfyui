@@ -1,0 +1,16 @@
+/* Only layout adaptation of pinned official controls; upstream theme is retained. */
+html[data-embedded="true"],body[data-embedded="true"]{margin:0;overflow:hidden}
+@media(max-width:640px){
+  .side-bar-panel{min-width:0!important;max-width:calc(100vw - 56px);flex-basis:calc(100vw - 56px)!important}
+  .flex:has(>.min-w-0>.subgraph-breadcrumb){flex-direction:column;gap:8px}
+  .flex:has(>.min-w-0>.subgraph-breadcrumb)>div{width:100%;min-width:0;max-width:100%;margin-inline:0}
+  div:has(>.actionbar-container),div:has(>div>.actionbar-container){width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+  .actionbar-container{flex-wrap:wrap;width:100%;min-width:0}
+  .actionbar-container>div:has(>.actionbar){width:100%;height:auto;min-width:0}
+  .actionbar{width:100%;min-width:0}
+  .actionbar .p-panel-content>div{flex-wrap:wrap;min-width:0}
+  .actionbar .drag-handle{display:none}
+  .actionbar .queue-button-group{flex-wrap:wrap;max-width:100%;min-width:0;height:auto}
+  .actionbar .queue-button-group>*{height:32px}
+  .p-dialog,.p-menu,.p-contextmenu{max-width:calc(100vw - 16px)}
+}

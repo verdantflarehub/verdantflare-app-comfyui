@@ -13,6 +13,26 @@ prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
 
 class ArtifactBoundaryTest(unittest.TestCase):
+    def test_patch_requires_exact_input_output_and_single_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); asset = root / 'main.js'
+            before, after = b'const value=old;', b'const value=new;'
+            patch_data = {'id': 'test', 'asset': 'main.js', 'before': 'old', 'after': 'new',
+                          'input_sha256': hashlib.sha256(before).hexdigest(),
+                          'output_sha256': hashlib.sha256(after).hexdigest()}
+            asset.write_bytes(before)
+            self.assertEqual(prepare.apply_patches(root, [patch_data])[0]['sha256'], patch_data['output_sha256'])
+            self.assertEqual(asset.read_bytes(), after)
+            with self.assertRaisesRegex(ValueError, 'INPUT_MISMATCH'):
+                prepare.apply_patches(root, [patch_data])
+            asset.write_bytes(before)
+            with self.assertRaisesRegex(ValueError, 'OUTPUT_MISMATCH'):
+                prepare.apply_patches(root, [{**patch_data, 'output_sha256': '0'*64}])
+            self.assertEqual(asset.read_bytes(), before)
+            repeated = before + before; asset.write_bytes(repeated)
+            with self.assertRaisesRegex(ValueError, 'TARGET_MISMATCH'):
+                prepare.apply_patches(root, [{**patch_data, 'input_sha256': hashlib.sha256(repeated).hexdigest()}])
+
     def run_package(self, entries, bad_hash=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

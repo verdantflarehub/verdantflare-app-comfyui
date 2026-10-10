@@ -2,7 +2,11 @@
   "comfyui": {
     "repository": "https://github.com/Comfy-Org/ComfyUI",
     "version": "0.32.0",
-    "revision": "c2bcbecd82ec5ae66594340b395c24ef0217b238"
+    "revision": "c2bcbecd82ec5ae66594340b395c24ef0217b238",
+    "url": "https://codeload.github.com/Comfy-Org/ComfyUI/zip/c2bcbecd82ec5ae66594340b395c24ef0217b238",
+    "size": 12358380,
+    "sha256": "495be6c0a34e81a6ea540bec37b0060bafafb09e87e5dacf5dbf75b4013ba552",
+    "license": "GPL-3.0-only"
   },
   "frontend": {
     "repository": "https://github.com/Comfy-Org/ComfyUI_frontend",
@@ -12,6 +16,17 @@
     "url": "https://files.pythonhosted.org/packages/fd/77/f6e2aea61ed41b6e4e9211a0354a947a1504d52982e401d1897f63024dfe/comfyui_frontend_package-1.48.7-py3-none-any.whl",
     "sha256": "f193369c4248bffe0b150dca9cba5e82f7c3add6645991377a992d5036aea8e7",
     "size": 22131689,
-    "license": "GPL-3.0-only"
+    "license": "GPL-3.0-only",
+    "patches": [
+      {
+        "id": "app-mode-graph-ready-1",
+        "source": "https://github.com/Comfy-Org/ComfyUI_frontend/blob/6d6af63c00f132cd25dc29307fc56bd2c094fa22/src/stores/appModeStore.ts",
+        "asset": "assets/settingStore-JJ6taRxG.js",
+        "input_sha256": "6377557ce0a1db19f13172853734c9e76c62e96a339d5b9def05b1b2081e12aa",
+        "output_sha256": "1106392d60e716a297ebf1f252ed789adcdecc04a1e27af74e1cc4a3575c8b7f",
+        "before": "()=>$.rootGraph?.events",
+        "after": "()=>$.isGraphReady?$.rootGraph.events:undefined"
+      }
+    ]
   }
 }

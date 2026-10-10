@@ -11,6 +11,25 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def apply_patches(output, patches):
+    applied = []
+    for patch in patches:
+        target = (output / patch['asset']).resolve()
+        if not target.is_relative_to(output.resolve()):
+            raise ValueError('UNSAFE_PATCH_PATH')
+        raw = target.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != patch['input_sha256']:
+            raise ValueError('FRONTEND_PATCH_INPUT_MISMATCH')
+        before, after = patch['before'].encode(), patch['after'].encode()
+        if raw.count(before) != 1:
+            raise ValueError('FRONTEND_PATCH_TARGET_MISMATCH')
+        result = raw.replace(before, after, 1)
+        if hashlib.sha256(result).hexdigest() != patch['output_sha256']:
+            raise ValueError('FRONTEND_PATCH_OUTPUT_MISMATCH')
+        target.write_bytes(result)
+        applied.append({'id': patch['id'], 'asset': patch['asset'], 'sha256': hashlib.sha256(result).hexdigest()})
+    return applied
+
 class EntryParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -56,6 +75,8 @@ def main():
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.read(info))
+    patches = apply_patches(output, lock.get('patches', []))
+    (output / 'vf-build.json').write_text(json.dumps({'frontend': lock['version'], 'wheel_sha256': lock['sha256'], 'patches': patches}, indent=2), encoding='utf-8')
     parsed = EntryParser()
     parsed.feed((output / 'index.html').read_text(encoding='utf-8'))
     def asset(path):
@@ -74,12 +95,13 @@ def main():
     (output / 'vf-embed.html').write_text(
         '<!doctype html><html><head><meta charset="utf-8"><title>ComfyUI</title>'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<script src="./vf/embed-bootstrap.js"></script>' + styles + modules +
+        '<script src="./vf/embed-bootstrap.js"></script>' + styles +
+        '<link rel="stylesheet" href="./vf/embed.css">' + modules +
         '</head><body class="litegraph grid"><div id="vue-app"></div></body></html>', encoding='utf-8')
     (output / 'vf').mkdir(exist_ok=True)
     for path in (ROOT / 'frontend').glob('*.*'):
         shutil.copyfile(path, output / 'vf' / path.name)
-    print(json.dumps({'frontend': lock['version'], 'sha256': lock['sha256'], 'modules': len(parsed.modules), 'styles': len(selected_styles), 'output': 'build/frontend'}))
+    print(json.dumps({'frontend': lock['version'], 'sha256': lock['sha256'], 'patches': patches, 'modules': len(parsed.modules), 'styles': len(selected_styles), 'output': 'build/frontend'}))
 
 if __name__ == '__main__':
     main()
