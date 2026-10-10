@@ -2,6 +2,12 @@
 html[data-embedded="true"],body[data-embedded="true"]{margin:0;overflow:hidden}
 @media(max-width:640px){
   .side-bar-panel{min-width:0!important;max-width:calc(100vw - 56px);flex-basis:calc(100vw - 56px)!important}
+  .side-bar-panel{flex-shrink:0}
+  .side-bar-panel[style*="display: flex"]~.p-splitter-gutter,
+  .side-bar-panel[style*="display: flex"]~.p-splitterpanel{display:none}
+  .minimap-main-container,.litegraph-minimap{max-width:calc(100vw - 8px)}
+  .minimap-canvas{max-width:100%;height:auto}
+  .p-buttongroup.absolute.right-0.bottom-0{max-width:calc(100vw - 8px);flex-wrap:wrap}
   .flex:has(>.min-w-0>.subgraph-breadcrumb){flex-direction:column;gap:8px}
   .flex:has(>.min-w-0>.subgraph-breadcrumb)>div{width:100%;min-width:0;max-width:100%;margin-inline:0}
   div:has(>.actionbar-container),div:has(>div>.actionbar-container){width:100%;min-width:0;max-width:100%;box-sizing:border-box}
