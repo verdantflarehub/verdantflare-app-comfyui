@@ -106,4 +106,14 @@ class TaskStoreTest(unittest.TestCase):
         self.store.cancel(self.actor, task['id'], 'project-a')
         self.assertEqual(self.store.submit(self.actor, 'instance-a', 'project-b', 'other', SNAPSHOT)['state'], 'accepted')
 
+    def test_queue_bound_preserves_existing_idempotency_and_recovers_after_cancel(self):
+        first = self.submit()
+        for i in range(31):
+            self.submit('key-' + str(i))
+        with self.assertRaisesRegex(TaskError, 'QUEUE_FULL'):
+            self.submit('overflow')
+        self.assertEqual(self.submit()['id'], first['id'])
+        self.store.cancel(self.actor, first['id'], 'project-a')
+        self.assertEqual(self.submit('overflow')['state'], 'accepted')
+
 if __name__ == '__main__': unittest.main()
