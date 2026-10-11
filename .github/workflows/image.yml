@@ -22,7 +22,7 @@ jobs:
         include:
           - component: comfyui
             dockerfile: Dockerfile
-            build_args: ''
+            build_args: ""
           - component: comfyui-worker-cpu
             dockerfile: Dockerfile.worker
             build_args: |
