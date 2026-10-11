@@ -4,6 +4,7 @@ import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -145,6 +146,7 @@ def snapshot(model):
                 '7': node('SaveImage', images=['6', 0], filename_prefix='output')}}
 
 
+@unittest.skipUnless(os.environ.get('COMFYUI_DEV_HTTP_TESTS') == '1', 'requires authorized development host')
 class ServiceTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -82,7 +82,7 @@ class JSONClient:
         self.origin, self.timeout, self.max_bytes = origin.rstrip('/'), timeout, max_bytes
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False):
+    def request(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False, accepted_statuses=(200,)):
         if not path.startswith('/') or path.startswith('//') or any(c in path for c in '?%#\\\r\n'):
             raise Error('INVALID_INTERNAL_PATH')
         suffix = '?' + urllib.parse.urlencode(query) if query else ''
@@ -92,7 +92,8 @@ class JSONClient:
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 raw = response.read(self.max_bytes + 1)
-                if response.status != 200 or len(raw) > self.max_bytes:
+                if (response.status not in accepted_statuses or len(raw) > self.max_bytes
+                        or response.headers.get('Content-Encoding')):
                     raise Error('DEPENDENCY_UNAVAILABLE', 503)
                 if empty and not raw:
                     return {}

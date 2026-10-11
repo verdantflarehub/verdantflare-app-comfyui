@@ -64,6 +64,18 @@ class TaskStore:
                 UNIQUE(instance_id,organization_id,owner_id,project_id,request_key)
               );
               CREATE INDEX IF NOT EXISTS sessions_active ON edit_sessions(instance_id,closed,expires);
+              CREATE TABLE IF NOT EXISTS stop_seals (
+                operation_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL REFERENCES instances(id),
+                organization_id TEXT NOT NULL, owner_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                UNIQUE(instance_id,generation)
+              );
+              CREATE TABLE IF NOT EXISTS maintenance_seals (
+                operation_id TEXT PRIMARY KEY, installation_id TEXT NOT NULL,
+                station_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('sealed','released'))
+              );
+              CREATE UNIQUE INDEX IF NOT EXISTS maintenance_active
+                ON maintenance_seals(installation_id) WHERE state='sealed';
               CREATE TABLE IF NOT EXISTS drafts (
                 instance_id TEXT NOT NULL REFERENCES instances(id), project_id TEXT NOT NULL,
                 revision_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
@@ -108,6 +120,20 @@ class TaskStore:
         return row
 
     @staticmethod
+    def installation_available(db, installation_id):
+        if db.execute("SELECT 1 FROM maintenance_seals WHERE installation_id=? AND state='sealed'",
+                      (installation_id,)).fetchone():
+            raise TaskError('INSTALLATION_MAINTENANCE')
+
+    @staticmethod
+    def instance_available(db, instance_id):
+        # Task-only / legacy stores have no installation directory.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='managed_instances'").fetchone():
+            row = db.execute('SELECT installation_id FROM managed_instances WHERE id=?', (instance_id,)).fetchone()
+            if row:
+                TaskStore.installation_available(db, row['installation_id'])
+
+    @staticmethod
     def task(db, task_id):
         row = db.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
         if not row:
@@ -150,6 +176,7 @@ class TaskStore:
                 return self.view(row)
             if instance['draining']:
                 raise TaskError('INSTANCE_DRAINING')
+            self.instance_available(db, instance_id)
             lease_now = time.time()
             db.execute('UPDATE edit_sessions SET closed=1 WHERE instance_id=? AND expires<=?', (instance_id, lease_now))
             if db.execute('''SELECT 1 FROM edit_sessions WHERE instance_id=? AND project_id<>?
@@ -309,11 +336,25 @@ class TaskStore:
             raise TaskError('INVALID_ERROR_CODE')
         return self.transition(task_id, generation, ('accepted', 'queued', 'dispatching', 'running', 'cancelling', 'reconciling', 'collecting'), 'failed', error=code)
 
+    @staticmethod
+    def has_base_editor(db):
+        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='base_editor'").fetchone() is not None
+
+    @staticmethod
+    def stop_busy(db, instance_id, now):
+        if db.execute("SELECT 1 FROM tasks WHERE instance_id=? AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1", (instance_id,)).fetchone():
+            return True
+        if db.execute('SELECT 1 FROM edit_sessions WHERE instance_id=? AND closed=0 AND expires>? LIMIT 1',
+                      (instance_id, now)).fetchone():
+            return True
+        return TaskStore.has_base_editor(db) and db.execute(
+            'SELECT 1 FROM base_editor WHERE instance_id=? AND expires>?', (instance_id, now)).fetchone() is not None
+
     def drain(self, instance_id):
         with self.transaction() as db:
             if db.execute('UPDATE instances SET draining=1 WHERE id=?', (instance_id,)).rowcount != 1:
                 raise TaskError('NOT_FOUND')
-            return not bool(db.execute("SELECT 1 FROM tasks WHERE instance_id=? AND state NOT IN ('succeeded','failed','cancelled') LIMIT 1", (instance_id,)).fetchone())
+            return not self.stop_busy(db, instance_id, time.time())
 
     def worker_restarted(self, instance_id):
         with self.transaction() as db:

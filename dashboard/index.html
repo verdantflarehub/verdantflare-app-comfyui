@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN"
+      data-embedded="true">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+  <title>ComfyUI 应用控制台</title>
+  <link rel="stylesheet"
+        href="./dashboard.css">
+</head>
+
+<body data-embedded="true">
+  <main id="dashboard"
+        class="comfyui-dashboard">
+    <header class="intro">
+      <h1>ComfyUI</h1>
+      <p>管理实例，进入工作流创作环境。</p>
+    </header>
+    <div class="toolbar">
+      <label>搜索实例 <input id="search"
+               type="search"
+               placeholder="名称或标识"
+               autocomplete="off"></label>
+      <button id="refresh"
+              type="button">刷新</button>
+      <button id="create"
+              type="button"
+              hidden>创建实例</button>
+    </div>
+    <form id="create-form" class="instance" hidden>
+      <h2>创建 ComfyUI 实例</h2>
+      <p>基础 CPU 环境。创建后处于未启动状态。</p>
+      <label>实例名称 <input id="create-name" required maxlength="80" autocomplete="off" placeholder="例如：工作流草稿"></label>
+      <p>初始工作流（可选）。选择文件后，点击创建才会保存到新实例。</p>
+      <div class="instance-actions">
+        <span id="workflow-name">使用空白工作流</span>
+        <button id="workflow-select" type="button">选择 JSON 工作流</button>
+        <button id="workflow-clear" type="button" hidden>移除</button>
+      </div>
+      <p id="create-message" role="status" aria-live="polite"></p>
+      <div class="instance-actions">
+        <button id="create-cancel" type="button">返回列表</button>
+        <button id="create-submit" type="submit">创建实例</button>
+      </div>
+    </form>
+    <p id="message"
+       role="status"
+       aria-live="polite">正在加载实例…</p>
+    <div id="instances"
+         aria-label="实例列表"></div>
+    <section id="detail"
+             hidden
+             aria-label="实例详情">
+      <button id="back"
+              type="button">返回实例列表</button>
+      <div id="detail-content"></div>
+    </section>
+  </main>
+  <script type="module"
+          src="./dashboard.mjs"></script>
+</body>
+
+</html>

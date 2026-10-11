@@ -10,7 +10,7 @@ concurrency:
 env:
   REGISTRY_ENDPOINT: ${{ secrets.REGISTRY_ENDPOINT_ALIYUN }}
   IMAGE_NAME: wod/verdantflare-app
-  VERSION: 0.1.2
+  VERSION: 0.1.3
 jobs:
   image:
     name: Build and publish ${{ matrix.component }}
@@ -57,11 +57,14 @@ jobs:
           IMAGE: ${{ steps.image.outputs.tag }}
         run: bash scripts/check-image-absent.sh
       - name: Build and publish versioned image
+        id: publish
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          build-args: ${{ matrix.build_args }}
+          build-args: |
+            APP_VERSION=${{ env.VERSION }}
+            ${{ matrix.build_args }}
           push: true
           platforms: linux/amd64
           tags: ${{ steps.image.outputs.tag }}
@@ -69,3 +72,35 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
           provenance: false
           sbom: false
+      - name: Extract Dashboard materials from the published image digest
+        if: matrix.component == 'comfyui'
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.tag }}
+          APP_IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$APP_IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
+          image_ref="${APP_IMAGE%:*}@${APP_IMAGE_DIGEST}"
+          docker pull "$image_ref"
+          release_container="$(docker create "$image_ref")"
+          trap 'docker rm "$release_container" >/dev/null' EXIT
+          mkdir -p build/dashboard-release
+          docker cp "$release_container:/opt/vf/build/dashboard" build/dashboard-release/dashboard
+          docker cp "$release_container:/opt/vf/build/frontend/workspace-index.json" build/dashboard-release/workspace-index.json
+          docker cp "$release_container:/opt/vf/VERSION" build/dashboard-release/VERSION
+          docker cp "$release_container:/opt/vf/management-release.json" build/dashboard-release/management-release.json
+      - name: Write immutable release material index
+        if: matrix.component == 'comfyui'
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.tag }}
+          APP_IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: python3 scripts/prepare_release.py --bundle build/dashboard-release
+      - name: Upload Dashboard release materials
+        if: matrix.component == 'comfyui'
+        uses: actions/upload-artifact@v4
+        with:
+          name: comfyui-dashboard-v${{ env.VERSION }}
+          path: build/dashboard-release/
+          if-no-files-found: error
+          retention-days: 30

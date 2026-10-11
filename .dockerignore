@@ -16,5 +16,11 @@
 !scripts/
 !scripts/prepare_frontend.py
 !scripts/prepare_runtime.py
+!scripts/prepare_dashboard.py
+!scripts/prepare_workspace.py
+!dashboard/
+!dashboard/**
+!VERSION
+!management-release.json
 **/__pycache__
 **/*.pyc

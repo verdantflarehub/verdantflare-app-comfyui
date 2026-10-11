@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .protocol import Error, decode, encode
+from .task_store import TaskError
 
 EMPTY_GRAPH = dict(last_node_id=0, last_link_id=0, nodes=[], links=[], groups=[], config={}, extra={}, version=0.4)
 MAX_DOCUMENT = 1 << 20
@@ -32,8 +33,9 @@ def graph_document(value):
 
 
 class Editor:
-    def __init__(self, app, native, frontend, *, clock=time.time):
+    def __init__(self, app, native, frontend, *, clock=time.time, initial_graph=None):
         self.app, self.native, self.frontend, self.clock = app, native, frontend, clock
+        self.initial_graph = graph_document(EMPTY_GRAPH if initial_graph is None else initial_graph)
         with app.store.transaction() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS base_editor (
@@ -61,12 +63,13 @@ class Editor:
         boot = self.native.identity(self.app.instance_id)
         now = self.clock()
         with self.app.store.transaction() as db:
+            self.check_admission(db, principal)
             if db.execute('SELECT 1 FROM tasks WHERE instance_id=? LIMIT 1', (self.app.instance_id,)).fetchone():
                 raise Error('EDITOR_TASK_CONTEXT_REQUIRED', 409)
             if db.execute('SELECT 1 FROM edit_sessions WHERE instance_id=? AND closed=0 AND expires>? LIMIT 1', (self.app.instance_id, now)).fetchone():
                 raise Error('EDITOR_IN_USE', 409)
             row = db.execute('SELECT * FROM base_editor WHERE instance_id=?', (self.app.instance_id,)).fetchone()
-            graph, version = graph_document(EMPTY_GRAPH), 0
+            graph, version = self.initial_graph, 0
             if row:
                 self.owner(row, principal)
                 graph, version = row['graph'], row['version']
@@ -85,6 +88,15 @@ class Editor:
         return {'session_id': row['session_id'], 'version': row['version'], 'graph': json.loads(row['graph']),
                 'expires_at': row['expires'], 'saved_to_project': False}
 
+    def check_admission(self, db, principal):
+        instance = self.app.store.instance(db, principal, self.app.instance_id)
+        try:
+            self.app.store.instance_available(db, self.app.instance_id)
+        except TaskError as exc:
+            raise Error(str(exc), 409) from None
+        if instance['draining']:
+            raise Error('INSTANCE_DRAINING', 409)
+
     @staticmethod
     def owner(row, principal):
         if row['organization_id'] != principal.organization_id or row['user_id'] != principal.user_id:
@@ -97,6 +109,7 @@ class Editor:
         boot = self.native.identity(self.app.instance_id)
         now = self.clock()
         with self.app.store.transaction() as db:
+            self.check_admission(db, principal)
             row = db.execute('SELECT * FROM base_editor WHERE instance_id=?', (self.app.instance_id,)).fetchone()
             if not row or row['session_id'] != session_id:
                 raise Error('EDITOR_SESSION_EXPIRED', 409)
@@ -114,6 +127,7 @@ class Editor:
         if type(version) is not int or version < 0:
             raise Error('INVALID_VERSION')
         with self.app.store.transaction() as db:
+            self.check_admission(db, principal)
             current = db.execute('SELECT * FROM base_editor WHERE instance_id=?', (self.app.instance_id,)).fetchone()
             if current['session_id'] != session_id or current['boot_id'] != row['boot_id'] or current['expires'] <= self.clock():
                 raise Error('EDITOR_SESSION_EXPIRED', 409)
@@ -196,6 +210,7 @@ class Editor:
             raise Error('INVALID_EDITOR_REQUEST')
         identity = (self.app.instance_id, principal.organization_id, principal.user_id)
         with self.app.store.transaction() as db:
+            self.check_admission(db, principal)
             current = db.execute('SELECT session_id,expires,last_seen FROM base_editor WHERE instance_id=?', (identity[0],)).fetchone()
             if (not current or current['session_id'] != session['session_id'] or current['expires'] <= self.clock()
                     or current['last_seen'] > self.clock()):

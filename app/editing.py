@@ -45,6 +45,7 @@ class Editing:
         if not row:
             raise TaskError('NOT_FOUND')
         if live:
+            self.store.instance_available(db, instance_id)
             now = self.clock()
             if row['closed'] or now >= row['expires'] or now < row['last_seen']:
                 db.execute('UPDATE edit_sessions SET closed=1 WHERE id=?', (session_id,))
@@ -65,6 +66,7 @@ class Editing:
         with self.transaction() as db:
             now = self.clock()
             instance = self.store.instance(db, principal, instance_id)
+            self.store.instance_available(db, instance_id)
             # Expiry must not revive an old writer after a clock rollback and
             # another window has acquired the lease.
             db.execute('UPDATE edit_sessions SET closed=1 WHERE instance_id=? AND expires<=?', (instance_id, now))
@@ -75,7 +77,7 @@ class Editing:
                 if row['mode'] != mode or row['revision_id'] != revision_id:
                     raise TaskError('IDEMPOTENCY_CONFLICT')
                 return self.view(self.session(db, principal, instance_id, project_id, row['id']))
-            if mode == 'edit' and instance['draining']:
+            if instance['draining']:
                 raise TaskError('INSTANCE_DRAINING')
             active = db.execute('''SELECT * FROM edit_sessions WHERE instance_id=? AND generation=?
                 AND closed=0 AND expires>?''', (instance_id, instance['generation'], now)).fetchall()

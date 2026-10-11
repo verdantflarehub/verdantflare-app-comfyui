@@ -2,7 +2,8 @@
 (() => {
   'use strict';
   if (window.parent === window) throw new Error('EMBED_PARENT_REQUIRED');
-  const expectedOrigin = new URLSearchParams(location.search).get('parent_origin');
+  const expectedOrigin = new URLSearchParams(location.search).get('parent_origin')
+    || new URLSearchParams(location.hash.slice(1)).get('parent_origin');
   if (!expectedOrigin || new URL(expectedOrigin).origin !== expectedOrigin) throw new Error('EMBED_ORIGIN_REQUIRED');
   const MAX_BODY = 1024 * 1024;
   let port, epoch;

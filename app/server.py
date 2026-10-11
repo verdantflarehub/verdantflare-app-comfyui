@@ -78,7 +78,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
         mcp = False
         try:
             principal = authenticate(self.headers, self.server.token)
+            manager = getattr(self.server, 'manager', None)
+            if self.path == '/internal/dashboard/instances':
+                if manager is None:
+                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+                return self.reply(201, manager.create(principal, self.body()))
+            start_prefix = '/internal/dashboard/instances/'
+            if self.path.startswith(start_prefix):
+                parts = self.path[len(start_prefix):].split('/')
+                if len(parts) != 2 or parts[1] not in ('start', 'stop'):
+                    raise Error('NOT_FOUND', 404)
+                if manager is None:
+                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+                action = manager.start if parts[1] == 'start' else manager.stop
+                result = action(principal, parts[0], self.body())
+                return self.reply(200 if result['status'] == 'succeeded' else 202, result)
+            if manager is not None and self.path == '/internal/workspace/resolve':
+                result = manager.resolve(principal, self.body())
+                if getattr(self.server, 'workspace', None) is None:
+                    raise Error('WORKSPACE_UNAVAILABLE', 503)
+                return self.reply(200, result)
+            managed_workspace_prefix = '/internal/workspace/instances/'
+            if manager is not None and self.path.startswith(managed_workspace_prefix):
+                parts = self.path[len(managed_workspace_prefix):].split('/')
+                if len(parts) != 2:
+                    raise Error('NOT_FOUND', 404)
+                if parts[1] == 'events':
+                    raise Error('WORKSPACE_EVENTS_UNAVAILABLE', 409)
+                from .editor_transport import action
+                _, _, editor = manager.services(principal, parts[0])
+                return self.reply(200, action(editor, principal, parts[1], self.body()))
             app = self.server.app
+            if app is None:
+                raise Error('NOT_FOUND', 404)
+            if self.path == '/internal/workspace/resolve':
+                from .workspace import resolve
+                app.authorize_instance(app.alias, principal)
+                if getattr(self.server, 'workspace', None) is None:
+                    raise Error('WORKSPACE_UNAVAILABLE', 503)
+                return self.reply(200, resolve(app, principal, self.server.native, self.server.editor, self.body()))
+            workspace_prefix = '/internal/workspace/instances/'
+            if self.path.startswith(workspace_prefix):
+                app.authorize_instance(app.alias, principal)
+                parts = self.path[len(workspace_prefix):].split('/')
+                if len(parts) != 2 or parts[0] != app.instance_id or not self.server.editor:
+                    raise Error('NOT_FOUND', 404)
+                from .editor_transport import action
+                # Streaming events retain their explicit transport. Do not return
+                # a private editor row through the generic JSON business API.
+                if parts[1] == 'events':
+                    raise Error('WORKSPACE_EVENTS_UNAVAILABLE', 409)
+                return self.reply(200, action(self.server.editor, principal, parts[1], self.body()))
             prefix = '/internal/editor/' + app.alias + '/'
             if self.path.startswith(prefix) and self.server.editor:
                 app.authorize_instance(app.alias, principal)
@@ -148,6 +198,62 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            manager = getattr(self.server, 'manager', None)
+            if self.path == '/internal/dashboard/instances' or (manager is not None and self.path == '/internal/instances'):
+                principal = authenticate(self.headers, self.server.token)
+                if manager is None:
+                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+                return self.reply(200, manager.directory(principal))
+            if self.path.startswith('/internal/dashboard/operations/'):
+                principal = authenticate(self.headers, self.server.token)
+                if manager is None:
+                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+                return self.reply(200, manager.operation(principal, self.path[len('/internal/dashboard/operations/'):]))
+            if self.path == '/internal/workspace-index' or self.path.startswith('/internal/workspace/assets/'):
+                # Only immutable release code is served here. Studio requires
+                # explicit publicAssets registration before exposing these bytes.
+                tokens = self.headers.get_all('Authorization', [])
+                if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), ('Bearer ' + self.server.token).encode()):
+                    raise Error('UNAUTHENTICATED', 401)
+                workspace = getattr(self.server, 'workspace', None)
+                if workspace is None:
+                    raise Error('WORKSPACE_UNAVAILABLE', 503)
+                raw, mime = ((workspace.index_bytes(), 'application/json') if self.path == '/internal/workspace-index'
+                             else workspace.asset(self.path[len('/internal/workspace/assets/'):]))
+                self.send_response(200)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.close_connection = True
+                self.wfile.write(raw)
+                return
+            if self.path in ('/internal/dashboard-declaration', '/internal/dashboard-index') or self.path.startswith('/internal/dashboard/'):
+                principal = authenticate(self.headers, self.server.token)
+                if manager is not None:
+                    manager.authorize(principal)
+                else:
+                    self.server.app.authorize_instance(self.server.app.alias, principal)
+                if self.server.dashboard is None:
+                    raise Error('DASHBOARD_UNAVAILABLE', 503)
+                if self.path == '/internal/dashboard-declaration':
+                    raw, mime = self.server.dashboard.declaration_bytes(), 'application/json; charset=utf-8'
+                elif self.path == '/internal/dashboard-index':
+                    raw, mime = self.server.dashboard.index_bytes(), 'application/json; charset=utf-8'
+                else:
+                    raw, mime = self.server.dashboard.asset(self.path[len('/internal/dashboard/'):])
+                self.send_response(200)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.close_connection = True
+                self.wfile.write(raw)
+                return
             if self.path.startswith('/internal/frontend/') and self.server.editor:
                 tokens = self.headers.get_all('Authorization', [])
                 if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), ('Bearer ' + self.server.token).encode()):
@@ -186,12 +292,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, app, token, native=None, editor=None):
+    def __init__(self, address, app, token, native=None, editor=None, dashboard=None, workspace=None, manager=None):
         if not token_valid(token):
             raise ValueError('internal credential required')
         self.app, self.token = app, token
         self.native = native
         self.editor = editor
+        self.workspace = workspace
+        self.dashboard = dashboard
+        self.manager = manager
         super().__init__(address, Handler)
 
 
@@ -200,6 +309,12 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args()
     config = decode(args.config.read_bytes())
+    if 'management' in config:
+        from .management_config import resolve_management_settings
+        release_version = (Path(__file__).resolve().parents[1] / 'VERSION').read_text(encoding='utf-8').strip()
+        config['management'] = resolve_management_settings(config['management'], os.environ, release_version=release_version)
+        from .compatibility import WorkerCompatibility
+        compatibility = WorkerCompatibility.load(Path(__file__).resolve().parents[1] / 'management-release.json', release_version)
     credentials = {os.environ['COMFYUI_APP_TOKEN']}
     access = UnconfiguredProjectAccess()
     if config.get('project_origin'):
@@ -207,9 +322,29 @@ def main():
         if len(credentials) != 3:
             raise ValueError('distinct internal credentials required')
         access = ProjectAccess(config['project_origin'], os.environ['COMFYUI_PROJECT_TOKEN'], os.environ['COMFYUI_AUTHORITY_TOKEN'])
-    app = Application(TaskStore(config['database']), alias=config['alias'], instance_id=config['instance_id'],
-                      principal=Principal(config['organization_id'], config['user_id']), project_access=access,
-                      policy=WorkflowPolicy(config.get('model')))
+    store = TaskStore(config['database'])
+    manager, app = None, None
+    if 'management' in config:
+        from .management import InstallationAuthority, InstanceManager
+        settings = config['management']
+        token = os.environ['COMFYUI_INSTALLATION_TOKEN']
+        if token in credentials or config.get('worker_origin'):
+            raise ValueError('distinct installation authority and managed worker bindings required')
+        authority = InstallationAuthority(settings['core_origin'], token, station_id=settings['station_id'],
+                                          installation_id=settings['installation_id'], app_version=settings['app_version'], compatibility=compatibility)
+        credentials.add(token)
+        runtime = None
+        if 'runtime_origin' in settings:
+            from .runtime import RuntimeClient
+            runtime_token = os.environ['COMFYUI_RUNTIME_TOKEN']
+            if runtime_token in credentials:
+                raise ValueError('distinct Runtime credential required')
+            runtime = RuntimeClient(settings['runtime_origin'], runtime_token, authority)
+        manager = InstanceManager(store, authority, runtime)
+    else:
+        app = Application(store, alias=config['alias'], instance_id=config['instance_id'],
+                          principal=Principal(config['organization_id'], config['user_id']), project_access=access,
+                          policy=WorkflowPolicy(config.get('model')))
     native = None
     if config.get('worker_origin'):
         from .execution import NativeClient
@@ -219,8 +354,15 @@ def main():
         native = NativeClient(config['worker_origin'], token=worker_token, timeout=3)
     from .editor import Editor
     frontend = Path(config.get('frontend_dir', str(Path(__file__).resolve().parents[1] / 'build/frontend')))
-    editor = Editor(app, native, frontend)
-    with Server((config.get('listen', '127.0.0.1'), config.get('port', 8091)), app, os.environ['COMFYUI_APP_TOKEN'], native, editor) as server:
+    if manager is not None:
+        manager.configure_workspace(access, frontend)
+    editor = Editor(app, native, frontend) if app is not None else None
+    from .dashboard import DashboardAssets
+    dashboard_root = Path(__file__).resolve().parents[1] / 'build/dashboard'
+    dashboard = DashboardAssets(dashboard_root) if dashboard_root.exists() else None
+    from .workspace import WorkspaceAssets
+    workspace = WorkspaceAssets(frontend) if (frontend / 'workspace-index.json').is_file() else None
+    with Server((config.get('listen', '127.0.0.1'), config.get('port', 8091)), app, os.environ['COMFYUI_APP_TOKEN'], native, editor, dashboard, workspace, manager) as server:
         server.serve_forever()
 
 

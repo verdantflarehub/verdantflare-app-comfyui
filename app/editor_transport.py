@@ -28,7 +28,8 @@ def action(editor, principal, name, body):
     if not isinstance(body, dict):
         raise Error('INVALID_EDITOR_REQUEST')
     fields = {'open': {'client_id'}, 'renew': {'session_id'}, 'close': {'session_id'},
-              'draft': {'session_id', 'version', 'graph'}, 'request': {'session_id', 'request'}, 'events': {'session_id'}}
+              'draft': {'session_id', 'version', 'graph'}, 'request': {'session_id', 'request'}, 'events': {'session_id'},
+              'poll': {'session_id'}}
     if name not in fields or set(body) != fields[name]:
         raise Error('INVALID_EDITOR_REQUEST')
     if name == 'open':
@@ -42,16 +43,39 @@ def action(editor, principal, name, body):
         return editor.update(principal, body['session_id'], body['version'], body['graph'])
     if name == 'request':
         return editor.request(principal, body['session_id'], body['request'])
+    if name == 'poll':
+        row = editor.check(principal, body['session_id'])
+        events = []
+        size = len(encode({'events': []}))
+        def collect(value):
+            nonlocal size
+            size += len(encode(value)) + (1 if events else 0)
+            if len(events) >= 128 or size > 65536:
+                raise Error('EDITOR_EVENTS_TOO_LARGE', 503)
+            events.append(value)
+        try:
+            asyncio.run(stream_events(editor, row, collect, duration=3))
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError):
+            raise Error('EDITOR_DISCONNECTED', 503) from None
+        # Do not publish data after the lease expired or changed during polling.
+        editor.check(principal, body['session_id'])
+        return {'events': events}
     return editor.check(principal, body['session_id'])
 
 
-async def stream_events(editor, row, emit):
-    """At most 15 seconds; Studio reauthenticates before each next connection."""
+async def stream_events(editor, row, emit, *, duration=15):
+    """Bounded capture plus at most two seconds for connection/close cleanup."""
     headers = {'Authorization': 'Bearer ' + editor.native.token, 'X-VF-Boot-Id': row['boot_id'], 'X-VF-Editor': '1'}
     url = editor.native.client.origin + '/ws'
-    deadline = time.monotonic() + 15
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=18), trust_env=False) as client:
-        async with client.ws_connect(url, headers=headers, heartbeat=5, max_msg_size=1 << 20) as socket:
+    deadline = time.monotonic() + duration
+    async def reject_redirect(*_):
+        raise Error('EDITOR_DISCONNECTED', 503)
+    trace = aiohttp.TraceConfig()
+    trace.on_request_redirect.append(reject_redirect)
+    async with asyncio.timeout(duration + 2), aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=duration), trust_env=False, trace_configs=[trace]) as client:
+        async with client.ws_connect(url, headers=headers, heartbeat=5, max_msg_size=1 << 20,
+                                     timeout=aiohttp.ClientWSTimeout(ws_close=1)) as socket:
             await socket.send_json({'type': 'feature_flags', 'data': {}})
             while time.monotonic() < deadline:
                 try:
@@ -62,14 +86,17 @@ async def stream_events(editor, row, emit):
                 if message.type == aiohttp.WSMsgType.TEXT:
                     value = decode(message.data.encode())
                     if isinstance(value, dict) and value.get('type') == 'status':
-                        remaining = value.get('data', {}).get('status', {}).get('exec_info', {}).get('queue_remaining')
-                        if type(remaining) is int and remaining >= 0:
-                            emit({'kind': 'socket', 'payload': {'type': 'status', 'data': {
-                                'status': {'exec_info': {'queue_remaining': remaining}}, 'sid': row['session_id']}}})
+                        remaining = value
+                        for key in ('data', 'status', 'exec_info', 'queue_remaining'):
+                            remaining = remaining.get(key) if isinstance(remaining, dict) else None
+                        if type(remaining) is not int or not 0 <= remaining <= (1 << 53) - 1:
+                            raise Error('INVALID_EDITOR_EVENTS', 503)
+                        emit({'kind': 'socket', 'payload': {'type': 'status', 'data': {
+                            'status': {'exec_info': {'queue_remaining': remaining}}, 'sid': row['session_id']}}})
                     elif isinstance(value, dict) and value.get('type') == 'feature_flags':
                         # Capabilities only; native task events and paths are not a base-editor API.
                         emit({'kind': 'socket', 'payload': {'type': 'feature_flags', 'data': {}}})
-                elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR}:
+                elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR}:
                     raise Error('EDITOR_DISCONNECTED', 503)
 
 
