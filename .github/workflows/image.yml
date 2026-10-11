@@ -10,7 +10,7 @@ concurrency:
 env:
   REGISTRY_ENDPOINT: ${{ secrets.REGISTRY_ENDPOINT_ALIYUN }}
   IMAGE_NAME: wod/verdantflare-app
-  VERSION: 0.1.1
+  VERSION: 0.1.2
 jobs:
   image:
     name: Build and publish ${{ matrix.component }}
@@ -28,6 +28,11 @@ jobs:
             build_args: |
               RUNTIME_REQUIREMENTS=requirements-runtime-cpu.lock
               COMFYUI_DEVICE=cpu
+          - component: comfyui-worker
+            dockerfile: Dockerfile.worker
+            build_args: |
+              RUNTIME_REQUIREMENTS=requirements-runtime.lock
+              COMFYUI_DEVICE=cuda
     steps:
       - uses: actions/checkout@v4
         with:

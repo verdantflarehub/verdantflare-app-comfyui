@@ -121,7 +121,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         or not isinstance(params.get('clientInfo'), dict)):
                     raise Error('INVALID_ARGUMENT')
                 result = {'protocolVersion': PROTOCOL, 'capabilities': {'tools': {}},
-                          'serverInfo': {'name': 'verdantflare-comfyui-' + app.alias, 'version': '0.1.1'}}
+                          'serverInfo': {'name': 'verdantflare-comfyui-' + app.alias, 'version': '0.1.2'}}
             elif method in ('ping', 'tools/list'):
                 if params:
                     raise Error('INVALID_ARGUMENT')
