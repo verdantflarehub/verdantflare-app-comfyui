@@ -77,6 +77,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         rid = None
         mcp = False
         try:
+            if self.path.startswith('/internal/maintenance/'):
+                from .maintenance_transport import PREFIX
+                maintenance = getattr(self.server, 'maintenance', None)
+                if maintenance is None:
+                    raise Error('NOT_FOUND', 404)
+                maintenance.authenticate(self.headers)
+                if self.path not in tuple(PREFIX + action for action in ('seal', 'status', 'release')):
+                    raise Error('NOT_FOUND', 404)
+                return self.reply(200, maintenance.execute(self.path[len(PREFIX):], self.body()))
             principal = authenticate(self.headers, self.server.token)
             manager = getattr(self.server, 'manager', None)
             if self.path == '/internal/dashboard/instances':
@@ -292,7 +301,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, app, token, native=None, editor=None, dashboard=None, workspace=None, manager=None):
+    def __init__(self, address, app, token, native=None, editor=None, dashboard=None, workspace=None, manager=None, maintenance=None):
         if not token_valid(token):
             raise ValueError('internal credential required')
         self.app, self.token = app, token
@@ -301,6 +310,7 @@ class Server(http.server.ThreadingHTTPServer):
         self.workspace = workspace
         self.dashboard = dashboard
         self.manager = manager
+        self.maintenance = maintenance
         super().__init__(address, Handler)
 
 
@@ -322,6 +332,10 @@ def main():
         if len(credentials) != 3:
             raise ValueError('distinct internal credentials required')
         access = ProjectAccess(config['project_origin'], os.environ['COMFYUI_PROJECT_TOKEN'], os.environ['COMFYUI_AUTHORITY_TOKEN'])
+    from .maintenance_transport import maintenance_settings, MaintenanceTransport
+    maintenance_config = maintenance_settings(os.environ, managed='management' in config,
+        credentials=credentials | {os.environ.get(name) for name in
+            ('COMFYUI_INSTALLATION_TOKEN', 'COMFYUI_RUNTIME_TOKEN', 'COMFYUI_WORKER_TOKEN')})
     store = TaskStore(config['database'])
     manager, app = None, None
     if 'management' in config:
@@ -362,7 +376,8 @@ def main():
     dashboard = DashboardAssets(dashboard_root) if dashboard_root.exists() else None
     from .workspace import WorkspaceAssets
     workspace = WorkspaceAssets(frontend) if (frontend / 'workspace-index.json').is_file() else None
-    with Server((config.get('listen', '127.0.0.1'), config.get('port', 8091)), app, os.environ['COMFYUI_APP_TOKEN'], native, editor, dashboard, workspace, manager) as server:
+    maintenance = MaintenanceTransport(manager, dashboard, *maintenance_config) if maintenance_config else None
+    with Server((config.get('listen', '127.0.0.1'), config.get('port', 8091)), app, os.environ['COMFYUI_APP_TOKEN'], native, editor, dashboard, workspace, manager, maintenance) as server:
         server.serve_forever()
 
 

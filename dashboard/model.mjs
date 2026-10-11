@@ -41,7 +41,13 @@ export function resourceText(metric, unit, now = Date.now()) {
   return `${Number((metric.value / 1024 ** Math.max(power, 0)).toFixed(1))} ${['B', 'KiB', 'MiB', 'GiB', 'TiB'][Math.max(power, 0)]}`;
 }
 
-export function createDirectoryController(sdk, onChange, timers = { setTimeout, clearTimeout }) {
+// Window timers require their native receiver, including inside a Dashboard host.
+const browserTimers = {
+  setTimeout: (callback, delay) => globalThis.setTimeout(callback, delay),
+  clearTimeout: handle => globalThis.clearTimeout(handle),
+};
+
+export function createDirectoryController(sdk, onChange, timers = browserTimers) {
   let items = [], state = 'loading', error = '', creation = false, visible = true, disposed = false, generation = 0;
   let request, poll;
   const emit = () => { if (!disposed) onChange({ items, state, error, creation }); };
@@ -176,7 +182,7 @@ export function createStopController(sdk, onChange, options) {
   return createRunOperationController('stop', sdk, onChange, options);
 }
 function createRunOperationController(action, sdk, onChange, { instanceId, storage, storageKey, newKey = newCreateKey,
-  timers = { setTimeout, clearTimeout } }) {
+  timers = browserTimers }) {
   if (!uuid7.test(instanceId)) throw Error('INVALID_INSTANCE');
   const prefix = action === 'start' ? 'START_' : 'STOP_';
   const progressing = action === 'start' ? 'starting' : 'stopping', completed = action === 'start' ? 'running' : 'stopped';
