@@ -207,6 +207,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
+            if self.path == '/healthz':
+                # Process/HTTP liveness only. No installation authorization or
+                # dependency calls: a replacement must be healthy before Core
+                # publishes its new management version.
+                return self.reply(200, {'status': 'ok'})
             manager = getattr(self.server, 'manager', None)
             if self.path == '/internal/dashboard/instances' or (manager is not None and self.path == '/internal/instances'):
                 principal = authenticate(self.headers, self.server.token)
