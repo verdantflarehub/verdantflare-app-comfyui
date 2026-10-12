@@ -46,7 +46,7 @@ class MaintenanceTransport:
             raise Error('UNAUTHENTICATED', 401)
 
     def execute(self, action, body):
-        if action not in ('seal', 'status', 'release'):
+        if action not in ('seal', 'status', 'release', 'cancel'):
             raise Error('NOT_FOUND', 404)
         if (not isinstance(body, dict) or set(body) != set(self.proof) | {'operation_id'}
                 or type(body.get('schema_version')) is not int or not valid_id(body.get('operation_id'))):

@@ -83,7 +83,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if maintenance is None:
                     raise Error('NOT_FOUND', 404)
                 maintenance.authenticate(self.headers)
-                if self.path not in tuple(PREFIX + action for action in ('seal', 'status', 'release')):
+                if self.path not in tuple(PREFIX + action for action in ('seal', 'status', 'release', 'cancel')):
                     raise Error('NOT_FOUND', 404)
                 return self.reply(200, maintenance.execute(self.path[len(PREFIX):], self.body()))
             principal = authenticate(self.headers, self.server.token)

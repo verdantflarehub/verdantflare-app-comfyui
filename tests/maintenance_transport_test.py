@@ -73,6 +73,15 @@ class MaintenanceTransportTest(unittest.TestCase):
         self.assertEqual(self.call('seal')[1]['maintenance_state'], 'released')
         self.assertEqual(self.count(), 1)
 
+    def test_cancel_handler_persists_absent_operation_and_blocks_late_seal(self):
+        expected = {**self.body, 'maintenance_state': 'released'}
+        self.assertEqual(self.call('cancel')[:2], (200, expected))
+        self.transport = MaintenanceTransport(InstanceManager(TaskStore(self.store.filename), self.authority),
+                                              self.dashboard, TOKEN, self.actor.organization_id)
+        for action in ('status', 'seal', 'cancel', 'release'):
+            self.assertEqual(self.call(action)[:2], (200, expected))
+        self.assertEqual(self.count(), 1)
+
     def test_app_token_user_headers_and_duplicate_auth_cannot_enter_gate(self):
         for headers in ([], [('Authorization', 'Bearer ' + APP_TOKEN)],
                         [('Authorization', 'Bearer ' + TOKEN)] * 2,

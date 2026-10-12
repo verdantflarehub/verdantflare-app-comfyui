@@ -90,6 +90,50 @@ class MaintenanceTest(unittest.TestCase):
         with self.assertRaisesRegex(Error, 'INSTALLATION_MAINTENANCE'):
             self.create()
 
+    def test_cancel_before_and_after_seal_fences_retries_and_other_operations(self):
+        for seal_first in (False, True):
+            scope = self.scope(request_id())
+            if seal_first:
+                self.gate.seal(*scope)
+            result = self.gate.cancel(*scope)
+            self.assertEqual(result['state'], 'released')
+            restarted = MaintenanceAdmission(TaskStore(self.store.filename))
+            self.assertEqual(restarted.cancel(*scope), result)
+            self.assertEqual(restarted.seal(*scope), result)
+            newer = self.scope(request_id())
+            restarted.seal(*newer)
+            self.assertEqual(restarted.cancel(*scope), result)
+            self.assertEqual(restarted.status(*newer)['state'], 'sealed')
+            with self.assertRaisesRegex(TaskError, 'MAINTENANCE_CONFLICT'):
+                restarted.cancel(scope[0], scope[1], request_id(), scope[3])
+            restarted.release(*newer)
+
+    def test_cancel_preserves_busy_editor_and_business_rows(self):
+        instance = self.create()
+        _, editor = self.editors(instance)
+        opened = editor.open(self.actor, str(uuid.uuid4()))
+        with self.store.transaction() as db:
+            before = {name: [tuple(row) for row in db.execute('SELECT * FROM ' + name)]
+                      for name in ('instances', 'managed_instances', 'base_editor', 'edit_sessions', 'tasks')}
+        with self.assertRaisesRegex(TaskError, 'INSTALLATION_BUSY'):
+            self.seal()
+        with self.assertRaisesRegex(TaskError, 'MAINTENANCE_SCOPE_CONFLICT'):
+            self.gate.cancel(self.authority.installation_id, self.authority.station_id, request_id(), request_id())
+        self.gate.cancel(*self.scope())
+        self.assertEqual(self.seal()['state'], 'released')
+        with self.store.transaction() as db:
+            after = {name: [tuple(row) for row in db.execute('SELECT * FROM ' + name)] for name in before}
+        self.assertEqual(after, before)
+        editor.update(self.actor, opened['session_id'], 0, {**EMPTY_GRAPH, 'nodes': [{'id': 1}]})
+        editor.close(self.actor, opened['session_id'])
+        self.assertEqual(self.seal()['state'], 'released')
+
+    def test_cancel_and_seal_race_always_finishes_released(self):
+        results = self.race(lambda: self.gate.cancel(*self.scope()))
+        self.assertTrue(all(isinstance(row, dict) for row in results), results)
+        self.assertEqual(MaintenanceAdmission(TaskStore(self.store.filename)).status(*self.scope())['state'], 'released')
+        self.assertEqual(self.seal()['state'], 'released')
+
     def test_idle_running_workers_and_drafts_preserved_while_new_work_is_blocked(self):
         instance = self.create()
         key = {'idempotency_key': request_id()}

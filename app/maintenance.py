@@ -62,6 +62,22 @@ class MaintenanceAdmission:
                        (operation_id, installation_id, station_id, organization_id))
             return self._view(self._prior(db, scope))
 
+    def cancel(self, installation_id, station_id, organization_id, operation_id):
+        """Persist a tombstone even when seal has not arrived yet."""
+        scope = self._scope(installation_id, station_id, organization_id, operation_id)
+        with self.store.transaction() as db:
+            row = self._prior(db, scope)
+            if row is None:
+                rows = db.execute('''SELECT m.station_id,i.organization_id FROM managed_instances m
+                    JOIN instances i ON i.id=m.id WHERE m.installation_id=?''', (installation_id,)).fetchall()
+                if any((r['station_id'], r['organization_id']) != (station_id, organization_id) for r in rows):
+                    raise TaskError('MAINTENANCE_SCOPE_CONFLICT')
+                db.execute("INSERT INTO maintenance_seals VALUES (?,?,?,?,'released')",
+                           (operation_id, installation_id, station_id, organization_id))
+            else:
+                db.execute("UPDATE maintenance_seals SET state='released' WHERE operation_id=?", (operation_id,))
+            return self._view(self._prior(db, scope))
+
     def release(self, installation_id, station_id, organization_id, operation_id):
         scope = self._scope(installation_id, station_id, organization_id, operation_id)
         with self.store.transaction() as db:
