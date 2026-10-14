@@ -30,6 +30,7 @@ test('startup commits recovery before dispatch and progresses only the original 
   assert.equal(calls.length, 0);
   await page.submit();
   assert.equal(page.snapshot().pending.operationId, operationId);
+  assert.equal(page.snapshot().busy, true);
   assert.equal(page.callbacks.size, 1);
   ready = true;
   await page.submit();
@@ -37,11 +38,12 @@ test('startup commits recovery before dispatch and progresses only the original 
   assert.deepEqual(calls[0], { method: 'POST', path: `/instances/${instanceId}/start`, body: { idempotency_key: key } });
   assert.equal(page.snapshot().result.status, 'succeeded');
   assert.equal(page.snapshot().pending, null);
+  assert.equal(page.snapshot().busy, false);
   assert.equal(values.size, 0); assert.equal(page.callbacks.size, 0);
   page.dispose();
 });
 
-test('lost response reload restores original key without implicitly starting', async () => {
+test('lost response reload restores original key and sync automatically resumes or clears', async () => {
   const values = new Map(), calls = [];
   const first = fixture(async input => { calls.push(input); throw Error('offline'); }, values);
   await first.submit(); first.dispose();
@@ -49,6 +51,9 @@ test('lost response reload restores original key without implicitly starting', a
   assert.equal(restored.snapshot().pending.idempotency_key, key);
   assert.equal(calls.length, 1);
   restored.emit('visible'); assert.equal(restored.callbacks.size, 0);
+  restored.sync('starting');
+  assert.equal(restored.snapshot().busy, true);
+  assert.equal(restored.callbacks.size, 1);
   await restored.submit();
   assert.deepEqual(calls[0], calls[1]);
   restored.dispose();

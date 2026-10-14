@@ -127,8 +127,8 @@ class ManagedStopTest(unittest.TestCase):
             results = list(pool.map(lambda _: self.stop(), range(8)))
         self.assertEqual(len({r['operation_id'] for r in results}), 1)
         self.assertTrue(all(call == self.stops[0] for call in self.stops))
-        with self.assertRaisesRegex(Error, 'INSTANCE_STOP_CONFLICT'):
-            self.manager.stop(self.actor, self.instance, {'idempotency_key': request_id()})
+        joined = self.manager.stop(self.actor, self.instance, {'idempotency_key': request_id()})
+        self.assertEqual(joined['operation_id'], results[0]['operation_id'])
         before = len(self.stops)
         self.allowed = False
         with self.assertRaisesRegex(Error, 'PERMISSION_DENIED'):
@@ -138,19 +138,24 @@ class ManagedStopTest(unittest.TestCase):
             self.manager.stop(Principal(self.actor.organization_id, request_id()), self.instance, self.body)
         self.assertEqual(len(self.stops), before)
 
-    def test_lost_result_recovers_same_request_and_read_never_drives_stop(self):
+    def test_lost_result_recovers_same_request_and_directory_reconciles_stop(self):
         self.mode = 'lost'
         with self.assertRaisesRegex(Error, 'DEPENDENCY_UNAVAILABLE'):
             self.stop()
         operation = self.stops[0]['stop_operation_id']
         self.assertEqual(self.manager.operation(self.actor, operation)['instance_state'], 'stopping')
-        self.manager.directory(self.actor)
         self.assertEqual(len(self.stops), 1)
+        self.manager.directory(self.actor)
+        self.assertEqual(len(self.stops), 2)
         self.manager = InstanceManager(TaskStore(self.path), self.authority, self.runtime)
         self.mode = 'ready'
+        items = self.manager.directory(self.actor)['instances']
+        self.assertEqual(items[0]['status'], 'stopped')
+        self.assertEqual(items[0]['allowed_actions'], ['start'])
         result = self.stop()
         self.assertEqual(result['operation_id'], operation)
-        self.assertEqual(self.stops[0], self.stops[1])
+        self.assertEqual(result['instance_state'], 'stopped')
+        self.assertEqual(self.stops[0], self.stops[2])
 
 
 if __name__ == '__main__':

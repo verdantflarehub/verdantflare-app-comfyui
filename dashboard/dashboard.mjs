@@ -83,37 +83,44 @@ function badgeClass(status) {
 function row(item) {
   const start = starters.get(item.instanceId)?.snapshot();
   const stop = stoppers.get(item.instanceId)?.snapshot();
+  const isStopping = item.status === 'stopping' || Boolean(stop?.busy);
+  const isStarting = item.status === 'starting' || Boolean(start?.busy);
+  const effectiveStatus = isStopping
+    ? 'stopping'
+    : isStarting
+      ? 'starting'
+      : item.status;
   const canStart =
     snapshot.state === 'ready' &&
-    (item.allowedActions.includes('start') || start?.pending);
+    !isStarting &&
+    !isStopping &&
+    (item.allowedActions.includes('start') || Boolean(start?.pending));
   const canStop =
     snapshot.state === 'ready' &&
-    (item.allowedActions.includes('stop') || stop?.pending);
-  const stopping =
-    stop?.busy || (stop?.pending?.operationId && stop?.error !== 'STOP_BUSY');
+    !isStopping &&
+    !isStarting &&
+    (item.allowedActions.includes('stop') || Boolean(stop?.pending));
   const openAllowed =
-    snapshot.state === 'ready' && !stopping && canOpen(item);
+    snapshot.state === 'ready' && !isStopping && !isStarting && canOpen(item);
 
   const startMessage =
     start?.error === 'START_RECOVERY_UNAVAILABLE'
-      ? '无法读取或保存启动恢复信息，请检查浏览器存储。'
+      ? '无法读取或保存操作状态，请检查浏览器存储。'
       : start?.error
-        ? '启动结果待确认，请重试原请求。'
-        : start?.pending
-          ? '启动尚待确认，可继续原启动。'
-          : '';
+        ? '启动失败，请重试。'
+        : '';
   const stopMessage =
     stop?.error === 'STOP_RECOVERY_UNAVAILABLE'
-      ? '无法读取或保存停止恢复信息，请检查浏览器存储。'
+      ? '无法读取或保存操作状态，请检查浏览器存储。'
       : stop?.error === 'STOP_BUSY'
-        ? '实例有活动任务或编辑会话，请先完成或关闭后重试。'
-        : stop?.pending
-          ? '停止尚待确认，可继续原停止。'
+        ? '实例正在使用中，请先关闭工作区后再停止。'
+        : stop?.error
+          ? '停止失败，请重试。'
           : '';
   const note = stopMessage || startMessage;
-  const noteError = Boolean(stop?.error || start?.error);
+  const noteError = Boolean(note);
 
-  const isRunning = item.status === 'running';
+  const isRunning = effectiveStatus === 'running';
   const cpuText = isRunning ? resourceText(item.resources.cpu, 'cores') : '—';
   const memText = isRunning ? resourceText(item.resources.memory, 'bytes') : '—';
   const gpuText = isRunning ? resourceText(item.resources.gpu, 'bytes') : '—';
@@ -122,17 +129,19 @@ function row(item) {
     ? `<button type="button" class="instance-name" data-open="${esc(item.instanceId)}">${esc(item.name)}</button>`
     : `<span class="instance-name">${esc(item.name)}</span>`;
 
-  const destroyBtn = `<button type="button" class="btn sm danger" disabled title="${isRunning ? '请先停止实例' : '实例销毁暂未开放'}">销毁</button>`;
-  const startBtn =
-    canStart || start?.error
-      ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" ${!canStart || (stop?.pending && !start?.pending) || start?.busy || start?.error === 'START_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>${start?.busy ? '启动中…' : start?.pending ? '继续启动' : '启动'}</button>`
+  const destroyBtn = `<button type="button" class="btn sm danger" disabled title="${isRunning || isStopping || isStarting ? '请先停止实例' : '实例销毁暂未开放'}">销毁</button>`;
+  const startBtn = isStarting
+    ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" disabled>启动中…</button>`
+    : canStart || start?.error
+      ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" ${!canStart || start?.error === 'START_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>启动</button>`
       : '';
-  const stopBtn =
-    canStop || stop?.error
-      ? `<button type="button" class="btn sm" data-stop="${esc(item.instanceId)}" ${!canStop || (start?.pending && !stop?.pending) || stop?.busy || stop?.error === 'STOP_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>${stop?.busy ? '停止中…' : stop?.pending ? '继续停止' : '停止'}</button>`
+  const stopBtn = isStopping
+    ? `<button type="button" class="btn sm" data-stop="${esc(item.instanceId)}" disabled>停止中…</button>`
+    : canStop || stop?.error
+      ? `<button type="button" class="btn sm" data-stop="${esc(item.instanceId)}" ${!canStop || stop?.error === 'STOP_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>停止</button>`
       : '';
   const openBtn =
-    isRunning || (!canStart && !start?.error)
+    isRunning || isStopping || (!isStarting && !canStart && !start?.error)
       ? `<button type="button" class="btn sm primary" data-open="${esc(item.instanceId)}" ${!openAllowed ? 'disabled' : ''}>打开 →</button>`
       : '';
 
@@ -146,7 +155,7 @@ function row(item) {
         </div>
       </div>
     </td>
-    <td><span class="badge ${esc(badgeClass(item.status))}">${esc(statusLabel(item))}</span></td>
+    <td><span class="badge ${esc(badgeClass(effectiveStatus))}">${esc(statusLabel({ status: effectiveStatus }))}</span></td>
     <td class="cell-resource">${esc(cpuText)}</td>
     <td class="cell-resource">${esc(memText)}</td>
     <td class="cell-resource">${esc(gpuText)}</td>
@@ -189,7 +198,7 @@ function render() {
 
   $('refresh').disabled = state === 'loading';
   $('create').hidden = !snapshot.creation && !creation.pending;
-  $('create').textContent = creation.pending ? '恢复创建' : '+ 创建实例';
+  $('create').textContent = '+ 创建实例';
   $('create-submit').disabled =
     picking || creation.busy || (!snapshot.creation && !creation.pending);
   $('workflow-select').disabled =
@@ -200,7 +209,7 @@ function render() {
     ? '正在选择工作流…'
     : (workflow?.name ??
       (creation.pending?.initial_workflow
-        ? '已保存原请求中的初始工作流'
+        ? '已保存初始工作流'
         : '使用空白工作流'));
 
   const filtered = filterInstances(items, $('search').value, statusFilter);
@@ -305,27 +314,25 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
             },
           ),
         );
+      starters.get(item.instanceId)?.sync?.(item.status);
+      stoppers.get(item.instanceId)?.sync?.(item.status);
     }
     render();
   });
   function renderCreation(value) {
     creation = value;
     $('create-name').disabled = value.busy || !!value.pending;
-    $('create-submit').textContent = value.busy
-      ? '正在创建…'
-      : value.pending
-        ? '重试原请求'
-        : '创建实例';
+    $('create-submit').textContent = value.busy ? '创建中…' : '创建实例';
     if (value.pending) $('create-name').value = value.pending.name;
     const msg = $('create-message');
     msg.dataset.error = String(Boolean(value.error));
     msg.textContent =
       value.error === 'CREATE_RECOVERY_UNAVAILABLE'
-        ? '无法读取或保存创建恢复信息，请检查浏览器存储。'
+        ? '无法读取或保存创建信息，请检查浏览器存储。'
         : value.error === 'INVALID_INSTANCE_CREATE'
           ? '请输入有效的实例名称。'
-          : value.pending && !value.busy
-            ? '创建结果待确认。重试会恢复同一请求，不会重复创建。'
+          : value.error
+            ? '创建实例失败，请重试。'
             : '';
     if (value.result && !value.pending) {
       workflow = null;

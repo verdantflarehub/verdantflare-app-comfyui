@@ -172,7 +172,11 @@ export function createDirectoryController(
       if (current === generation && !disposed) {
         request = undefined;
         emit();
-        if (visible) poll = timers.setTimeout(refresh, 10000);
+        const hasTransition = items.some(
+          (item) => item.status === 'starting' || item.status === 'stopping',
+        );
+        if (visible)
+          poll = timers.setTimeout(refresh, hasTransition ? 2000 : 10000);
       }
     }
   }
@@ -420,7 +424,7 @@ function createRunOperationController(
   const progressing = action === 'start' ? 'starting' : 'stopping',
     completed = action === 'start' ? 'running' : 'stopped';
   let pending = null,
-    busy = false,
+    inFlight = false,
     disposed = false,
     visible = true,
     active = false,
@@ -452,7 +456,7 @@ function createRunOperationController(
   }
   const snapshot = () => ({
     pending: pending ? { ...pending } : null,
-    busy,
+    busy: inFlight || active,
     error,
     result,
   });
@@ -470,11 +474,44 @@ function createRunOperationController(
         void submit();
       }, 2000);
   };
+  function sync(status) {
+    if (disposed || error === prefix + 'RECOVERY_UNAVAILABLE') return;
+    if (
+      status === completed ||
+      (action === 'stop' && status === 'created')
+    ) {
+      if (pending || active || error) {
+        cancel();
+        active = false;
+        error = '';
+        try {
+          storage.removeItem(storageKey);
+          pending = null;
+        } catch {
+          error = prefix + 'RECOVERY_UNAVAILABLE';
+        }
+        emit();
+      }
+      return;
+    }
+    if (
+      status === progressing &&
+      pending &&
+      !active &&
+      !inFlight &&
+      visible &&
+      !error
+    ) {
+      active = true;
+      emit();
+      schedule();
+    }
+  }
   async function submit() {
     if (
       disposed ||
       !visible ||
-      busy ||
+      inFlight ||
       error === prefix + 'RECOVERY_UNAVAILABLE'
     )
       return;
@@ -496,7 +533,7 @@ function createRunOperationController(
       }
     }
     active = true;
-    busy = true;
+    inFlight = true;
     error = '';
     result = null;
     cancel();
@@ -563,7 +600,7 @@ function createRunOperationController(
         active = false;
       }
     } finally {
-      busy = false;
+      inFlight = false;
       request = undefined;
       emit();
       schedule();
@@ -586,5 +623,5 @@ function createRunOperationController(
       unsubscribe();
     }
   }
-  return { submit, snapshot, dispose };
+  return { submit, sync, snapshot, dispose };
 }

@@ -81,10 +81,14 @@ class ManagedStartTest(unittest.TestCase):
             results = list(pool.map(lambda _: self.start(), range(8)))
         self.assertEqual(len({r['operation_id'] for r in results}), 1)
         self.assertTrue(all(r == self.calls[0] for r in self.calls))
-        with self.assertRaisesRegex(Error, 'INSTANCE_START_CONFLICT'):
-            self.manager.start(self.actor, self.instance, {'idempotency_key': request_id()})
+        joined = self.manager.start(self.actor, self.instance, {'idempotency_key': request_id()})
+        self.assertEqual(joined['operation_id'], results[0]['operation_id'])
         with self.assertRaisesRegex(Error, 'IDEMPOTENCY_CONFLICT'):
             self.manager.start(self.actor, self.create(), self.body)
+        self.mode = 'ready'
+        self.start()
+        with self.assertRaisesRegex(Error, 'INSTANCE_START_CONFLICT'):
+            self.manager.start(self.actor, self.instance, {'idempotency_key': request_id()})
 
     def test_failed_insert_never_calls_runtime(self):
         with self.store.transaction() as db:
@@ -142,12 +146,18 @@ class ManagedStartTest(unittest.TestCase):
         self.mode = 'pending'
         self.assertEqual(self.start(), expected)
 
-    def test_directory_and_operation_reads_never_drive_start(self):
+    def test_directory_reconciles_in_flight_start_while_operation_read_never_drives_start(self):
+        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'created')
+        self.assertEqual(self.calls, [])
         result = self.start()
+        original = self.calls[0]
         self.calls.clear()
-        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'starting')
         self.assertEqual(self.manager.operation(self.actor, result['operation_id']), result)
         self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'starting')
+        self.assertEqual(self.calls, [original])
+        self.mode = 'ready'
+        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'running')
 
     def test_directory_requires_current_access_and_bounds_observation_without_dropping_instances(self):
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start'])

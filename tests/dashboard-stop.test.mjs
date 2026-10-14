@@ -34,19 +34,22 @@ test('busy stop preserves original key and waits for explicit retry after editin
     ? { status: 409, data: { code: 'INSTANCE_BUSY' } } : reply(state === 'ready'); });
   await page.submit();
   assert.equal(page.snapshot().error, 'STOP_BUSY'); assert.equal(page.callbacks.size, 0);
+  assert.equal(page.snapshot().busy, false);
   assert.equal(page.snapshot().pending.idempotency_key, key);
   state = 'pending'; await page.submit();
   assert.equal(page.callbacks.size, 1); assert.equal(page.snapshot().pending.operationId, operationId);
+  assert.equal(page.snapshot().busy, true);
   page.emit('hidden'); assert.equal(page.callbacks.size, 0);
   page.emit('visible'); assert.equal(page.callbacks.size, 1);
   state = 'ready'; await page.submit();
   assert.deepEqual(calls[0], calls[1]); assert.deepEqual(calls[1], calls[2]);
   assert.equal(calls[0].path, `/instances/${instanceId}/stop`);
   assert.equal(page.snapshot().result.instance_state, 'stopped'); assert.equal(page.values.size, 0);
+  assert.equal(page.snapshot().busy, false);
   page.dispose();
 });
 
-test('lost stop response restores original operation without an automatic mutation', async () => {
+test('lost stop response restores original operation and sync clears when stopped', async () => {
   const values = new Map(), calls = [];
   let offline = false;
   const request = async input => { calls.push(input); if (offline) throw null; return reply(); };
@@ -56,7 +59,14 @@ test('lost stop response restores original operation without an automatic mutati
   const restored = fixture(async input => { calls.push(input); return reply(true); }, values);
   assert.equal(calls.length, 2); assert.equal(restored.callbacks.size, 0);
   assert.equal(restored.snapshot().pending.operationId, operationId);
-  await restored.submit(); assert.deepEqual(calls[0], calls[2]); restored.dispose();
+  await restored.submit(); assert.deepEqual(calls[0], calls[2]);
+  restored.dispose();
+  values.set('test-stop', JSON.stringify({ instanceId, idempotency_key: key, operationId }));
+  const synced = fixture(async () => reply(true), values);
+  synced.sync('stopped');
+  assert.equal(synced.snapshot().pending, null);
+  assert.equal(values.size, 0);
+  synced.dispose();
 });
 
 test('start results or changed stop identities cannot clear stop recovery', async () => {

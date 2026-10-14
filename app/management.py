@@ -105,6 +105,25 @@ class InstanceManager:
                 'status': 'succeeded' if row['phase'] == 'running' else 'running',
                 'instance_id': row['instance_id'], 'instance_state': row['phase']}
 
+    def _advance_start(self, principal, instance_id, request):
+        result = self.runtime.start(principal, request)
+        access = self.runtime.access(principal, request) if result['status'] == 'succeeded' else None
+        self.authorize(principal)
+        with self.store.transaction() as db:
+            instance = self._managed(db, principal, instance_id)
+            row = db.execute('SELECT * FROM instance_start_operations WHERE id=?', (request['operation_id'],)).fetchone()
+            if (not row or row['runtime_request'] != canonical(request) or instance['generation'] != request['generation']
+                    or instance['draining']):
+                raise Error('STALE_GENERATION', 409)
+            if access is not None:
+                boot = access['boot_id']
+                if instance['worker_boot_id'] not in (None, boot) or row['boot_id'] not in (None, boot):
+                    raise Error('STALE_WORKER', 409)
+                db.execute('UPDATE instances SET worker_boot_id=? WHERE id=?', (boot, instance_id))
+                db.execute("UPDATE instance_start_operations SET phase='running',boot_id=? WHERE id=?", (boot, row['id']))
+                row = db.execute('SELECT * FROM instance_start_operations WHERE id=?', (row['id'],)).fetchone()
+            return self._start_result(row)
+
     def start(self, principal, instance_id, body):
         if (not valid_id(instance_id) or not isinstance(body, dict) or set(body) != {'idempotency_key'}
                 or not valid_id(body['idempotency_key'])):
@@ -133,48 +152,71 @@ class InstanceManager:
                 latest = db.execute('SELECT * FROM instance_start_operations WHERE instance_id=? ORDER BY generation DESC LIMIT 1', (instance_id,)).fetchone()
                 generation = instance['generation']
                 if latest:
-                    stopped = db.execute("SELECT 1 FROM instance_stop_operations WHERE start_operation_id=? AND phase='stopped'", (latest['id'],)).fetchone()
-                    if not stopped:
-                        raise Error('INSTANCE_START_CONFLICT', 409)
-                    if (latest['generation'] != generation or instance['worker_boot_id'] is not None
-                            or not instance['draining'] or generation >= 9223372036854775807):
-                        raise Error('STALE_GENERATION', 409)
-                    generation += 1
-                    db.execute('UPDATE instances SET generation=?,draining=0 WHERE id=?', (generation, instance_id))
+                    if latest['phase'] == 'starting' and not instance['draining']:
+                        if latest['generation'] != generation or instance['worker_boot_id'] is not None:
+                            raise Error('STALE_GENERATION', 409)
+                        request = decode(latest['runtime_request'].encode())
+                    else:
+                        stopped = db.execute("SELECT 1 FROM instance_stop_operations WHERE start_operation_id=? AND phase='stopped'", (latest['id'],)).fetchone()
+                        if not stopped:
+                            raise Error('INSTANCE_START_CONFLICT', 409)
+                        if (latest['generation'] != generation or instance['worker_boot_id'] is not None
+                                or not instance['draining'] or generation >= 9223372036854775807):
+                            raise Error('STALE_GENERATION', 409)
+                        generation += 1
+                        db.execute('UPDATE instances SET generation=?,draining=0 WHERE id=?', (generation, instance_id))
+                        request = {'installation_id': scope[0], 'instance_id': instance_id, 'operation_id': request_id(),
+                                   'generation': generation, 'app_version': instance['app_version'],
+                                   'profile_id': instance['profile_id']}
+                        db.execute('''INSERT INTO instance_start_operations
+                            (id,instance_id,installation_id,organization_id,owner_id,request_key,generation,runtime_request,phase,created_ns)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                                   (request['operation_id'], instance_id, *scope, body['idempotency_key'], request['generation'],
+                                    canonical(request), 'starting', time.time_ns()))
                 elif instance['draining'] or instance['worker_boot_id'] is not None or generation != 1:
                     raise Error('STALE_GENERATION', 409)
-                request = {'installation_id': scope[0], 'instance_id': instance_id, 'operation_id': request_id(),
-                           'generation': generation, 'app_version': instance['app_version'],
-                           'profile_id': instance['profile_id']}
-                db.execute('''INSERT INTO instance_start_operations
-                    (id,instance_id,installation_id,organization_id,owner_id,request_key,generation,runtime_request,phase,created_ns)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)''',
-                           (request['operation_id'], instance_id, *scope, body['idempotency_key'], request['generation'],
-                            canonical(request), 'starting', time.time_ns()))
-        # Commit the original request before any network effect. Unknown outcomes
-        # keep the same operation; reads never perform this mutating call.
-        result = self.runtime.start(principal, request)
-        access = self.runtime.access(principal, request) if result['status'] == 'succeeded' else None
-        self.authorize(principal)
-        with self.store.transaction() as db:
-            instance = self._managed(db, principal, instance_id)
-            row = db.execute('SELECT * FROM instance_start_operations WHERE id=?', (request['operation_id'],)).fetchone()
-            if (not row or row['runtime_request'] != canonical(request) or instance['generation'] != request['generation']
-                    or instance['draining']):
-                raise Error('STALE_GENERATION', 409)
-            if access is not None:
-                boot = access['boot_id']
-                if instance['worker_boot_id'] not in (None, boot) or row['boot_id'] not in (None, boot):
-                    raise Error('STALE_WORKER', 409)
-                db.execute('UPDATE instances SET worker_boot_id=? WHERE id=?', (boot, instance_id))
-                db.execute("UPDATE instance_start_operations SET phase='running',boot_id=? WHERE id=?", (boot, row['id']))
-                row = db.execute('SELECT * FROM instance_start_operations WHERE id=?', (row['id'],)).fetchone()
-            return self._start_result(row)
+                else:
+                    request = {'installation_id': scope[0], 'instance_id': instance_id, 'operation_id': request_id(),
+                               'generation': generation, 'app_version': instance['app_version'],
+                               'profile_id': instance['profile_id']}
+                    db.execute('''INSERT INTO instance_start_operations
+                        (id,instance_id,installation_id,organization_id,owner_id,request_key,generation,runtime_request,phase,created_ns)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                               (request['operation_id'], instance_id, *scope, body['idempotency_key'], request['generation'],
+                                canonical(request), 'starting', time.time_ns()))
+        return self._advance_start(principal, instance_id, request)
 
     @staticmethod
     def _stop_result(row):
         return {'schema_version': 1, 'operation_id': row['id'], 'action': 'stop', 'instance_id': row['instance_id'],
                 'status': 'succeeded' if row['phase'] == 'stopped' else 'running', 'instance_state': row['phase']}
+
+    def _advance_stop(self, principal, instance_id, request, *, deadline=None):
+        result = self.runtime.stop(principal, request)
+        while (result.get('status') == 'running'
+               and result.get('phase') in ('accepted', 'sealed', 'pod_deleted', 'service_delete_requested')):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            prev_phase = result.get('phase')
+            result = self.runtime.stop(principal, request)
+            if result.get('phase') == prev_phase:
+                break
+        self.authorize(principal)
+        with self.store.transaction() as db:
+            instance = self._managed(db, principal, instance_id)
+            row = db.execute('SELECT * FROM instance_stop_operations WHERE id=?', (request['stop_operation_id'],)).fetchone()
+            if not row or row['runtime_request'] != canonical(request):
+                raise Error('INSTANCE_STOP_CONFLICT', 409)
+            if row['phase'] == 'stopped':
+                return self._stop_result(row)
+            if (instance['generation'] != request['generation'] or instance['worker_boot_id'] != request['boot_id']
+                    or not instance['draining']):
+                raise Error('STALE_GENERATION', 409)
+            if result['status'] == 'succeeded':
+                db.execute("UPDATE instance_stop_operations SET phase='stopped' WHERE id=?", (row['id'],))
+                db.execute('UPDATE instances SET worker_boot_id=NULL WHERE id=?', (instance_id,))
+                row = db.execute('SELECT * FROM instance_stop_operations WHERE id=?', (row['id'],)).fetchone()
+            return self._stop_result(row)
 
     def stop(self, principal, instance_id, body):
         if (not valid_id(instance_id) or not isinstance(body, dict) or set(body) != {'idempotency_key'}
@@ -200,35 +242,24 @@ class InstanceManager:
                     raise Error('STALE_GENERATION', 409)
             else:
                 self._admit(db)
-                if db.execute("SELECT 1 FROM instance_stop_operations WHERE instance_id=? AND phase='stopping'", (instance_id,)).fetchone():
-                    raise Error('INSTANCE_STOP_CONFLICT', 409)
-                start = self._check_run(db, principal, instance_id)
-                operation = request_id()
-                request = {**decode(start['runtime_request'].encode()), 'stop_operation_id': operation, 'boot_id': instance['worker_boot_id']}
-                try:
-                    StopAdmission(self.store).seal_in_transaction(db, principal, instance_id, operation, instance['generation'])
-                except TaskError as exc:
-                    raise Error(str(exc), 409) from None
-                db.execute('INSERT INTO instance_stop_operations VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                           (operation, instance_id, start['id'], *scope, body['idempotency_key'], instance['generation'],
-                            canonical(request), 'stopping', time.time_ns()))
-        result = self.runtime.stop(principal, request)
-        self.authorize(principal)
-        with self.store.transaction() as db:
-            instance = self._managed(db, principal, instance_id)
-            row = db.execute('SELECT * FROM instance_stop_operations WHERE id=?', (request['stop_operation_id'],)).fetchone()
-            if not row or row['runtime_request'] != canonical(request):
-                raise Error('INSTANCE_STOP_CONFLICT', 409)
-            if row['phase'] == 'stopped':
-                return self._stop_result(row)
-            if (instance['generation'] != request['generation'] or instance['worker_boot_id'] != request['boot_id']
-                    or not instance['draining']):
-                raise Error('STALE_GENERATION', 409)
-            if result['status'] == 'succeeded':
-                db.execute("UPDATE instance_stop_operations SET phase='stopped' WHERE id=?", (row['id'],))
-                db.execute('UPDATE instances SET worker_boot_id=NULL WHERE id=?', (instance_id,))
-                row = db.execute('SELECT * FROM instance_stop_operations WHERE id=?', (row['id'],)).fetchone()
-            return self._stop_result(row)
+                in_flight = db.execute("SELECT * FROM instance_stop_operations WHERE instance_id=? AND phase='stopping'", (instance_id,)).fetchone()
+                if in_flight:
+                    request = decode(in_flight['runtime_request'].encode())
+                    if (in_flight['generation'] != instance['generation'] or not instance['draining']
+                            or request['boot_id'] != instance['worker_boot_id']):
+                        raise Error('STALE_GENERATION', 409)
+                else:
+                    start = self._check_run(db, principal, instance_id)
+                    operation = request_id()
+                    request = {**decode(start['runtime_request'].encode()), 'stop_operation_id': operation, 'boot_id': instance['worker_boot_id']}
+                    try:
+                        StopAdmission(self.store).seal_in_transaction(db, principal, instance_id, operation, instance['generation'])
+                    except TaskError as exc:
+                        raise Error(str(exc), 409) from None
+                    db.execute('INSERT INTO instance_stop_operations VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                               (operation, instance_id, start['id'], *scope, body['idempotency_key'], instance['generation'],
+                                canonical(request), 'stopping', time.time_ns()))
+        return self._advance_stop(principal, instance_id, request, deadline=time.monotonic() + 2)
 
     def authorize(self, principal):
         self.authority.check(principal)
@@ -381,6 +412,30 @@ class InstanceManager:
                 status = 'unknown'
             elif status == 'created' and self.runtime is not None:
                 actions = ['start']
+            elif status == 'stopping' and self.runtime is not None and deadline - time.monotonic() > 0:
+                try:
+                    with self.store.transaction() as db:
+                        self._admit(db)
+                        op = db.execute("SELECT runtime_request FROM instance_stop_operations WHERE instance_id=? AND phase='stopping'", (row['id'],)).fetchone()
+                    if op is not None:
+                        status = self._advance_stop(principal, row['id'], decode(op['runtime_request'].encode()), deadline=deadline)['instance_state']
+                except Error:
+                    pass
+                if status == 'stopped':
+                    actions = ['start']
+            elif status == 'starting' and self.runtime is not None and deadline - time.monotonic() > 0:
+                try:
+                    with self.store.transaction() as db:
+                        self._admit(db)
+                        op = db.execute("SELECT runtime_request FROM instance_start_operations WHERE instance_id=? AND generation=? AND phase='starting'", (row['id'], row['generation'])).fetchone()
+                    if op is not None:
+                        status = self._advance_start(principal, row['id'], decode(op['runtime_request'].encode()))['instance_state']
+                except Error:
+                    pass
+                if status == 'running':
+                    actions = ['stop']
+                    if self.frontend is not None and (self.frontend / 'vf-embed.html').is_file():
+                        actions, editor_state = ['open', 'stop'], 'ready'
             elif status == 'stopped' and self.runtime is not None:
                 actions = ['start']
             elif status == 'running':
