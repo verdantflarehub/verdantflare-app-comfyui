@@ -37,7 +37,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_resolution_checks_exact_instance_and_running_state_without_taking_a_lease(self):
         result = resolve(self.app, 'actor', self.native, self.editor, {'instanceId': self.instance, 'entryId': 'editor'})
-        self.assertEqual(result, {'instanceId': self.instance, 'entryId': 'editor', 'state': 'running'})
+        self.assertEqual(result, {'instanceId': self.instance, 'instanceName': 'ComfyUI A', 'entryId': 'editor', 'state': 'running'})
         for body in [{'instanceId': request_id(), 'entryId': 'editor'}, {'instanceId': self.instance, 'entryId': 'shell'},
                      {'instanceId': self.instance, 'entryId': 'editor', 'url': 'https://other.invalid'}]:
             with self.assertRaises(Error): resolve(self.app, 'actor', self.native, self.editor, body)

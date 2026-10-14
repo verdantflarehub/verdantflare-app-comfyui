@@ -518,4 +518,6 @@ class InstanceManager:
         _, _, editor = self.services(principal, body['instanceId'])
         if not editor.available:
             raise Error('WORKSPACE_UNAVAILABLE', 503)
-        return {'instanceId': body['instanceId'], 'entryId': 'editor', 'state': 'running'}
+        with self.store.transaction() as db:
+            instance = self._managed(db, principal, body['instanceId'])
+        return {'instanceId': body['instanceId'], 'instanceName': instance['name'], 'entryId': 'editor', 'state': 'running'}

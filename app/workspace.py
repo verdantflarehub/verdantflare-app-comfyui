@@ -25,7 +25,7 @@ def resolve(app, principal, native, editor, body):
     if current['status'] != 'running' or 'open' not in current['allowed_actions']:
         raise Error('INSTANCE_ENTRY_UNAVAILABLE', 409)
     # Resolving a route never takes an editing lease or starts an instance.
-    return {'instanceId': app.instance_id, 'entryId': 'editor', 'state': 'running'}
+    return {'instanceId': app.instance_id, 'instanceName': current['name'], 'entryId': 'editor', 'state': 'running'}
 
 
 class WorkspaceAssets(DashboardAssets):

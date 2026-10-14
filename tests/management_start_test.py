@@ -190,7 +190,7 @@ class ManagedStartTest(unittest.TestCase):
                 'protocol': 1, 'instance_id': app.instance_id, 'boot_id': self.boot})
             sessions.append(editor.open(self.actor, str(uuid.uuid4())))
             self.assertEqual(self.manager.resolve(self.actor, {'instanceId': app.instance_id, 'entryId': 'editor'}),
-                             {'instanceId': app.instance_id, 'entryId': 'editor', 'state': 'running'})
+                             {'instanceId': app.instance_id, 'instanceName': 'A', 'entryId': 'editor', 'state': 'running'})
         self.assertIsNot(triples[0][1], triples[1][1])
         self.assertNotEqual(sessions[0]['session_id'], sessions[1]['session_id'])
         with self.store.transaction() as db:
