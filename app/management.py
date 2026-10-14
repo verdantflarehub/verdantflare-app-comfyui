@@ -10,6 +10,7 @@ from .protocol import Error, JSONClient, request_id, token_valid, valid_id, deco
 from .task_store import canonical, TaskError
 from .admission import StopAdmission
 from .compatibility import WorkerCompatibility, compatibility_for
+from .instances import resource_binding
 
 
 class InstallationAuthority:
@@ -115,7 +116,7 @@ class InstanceManager:
                 'status': 'succeeded' if row['phase'] == 'running' else 'running',
                 'instance_id': row['instance_id'], 'instance_state': row['phase']}
 
-    def _advance_start(self, principal, instance_id, request):
+    def _advance_start_with_binding(self, principal, instance_id, request):
         result = self.runtime.start(principal, request)
         access = self.runtime.access(principal, request) if result['status'] == 'succeeded' else None
         self.authorize(principal)
@@ -132,7 +133,11 @@ class InstanceManager:
                 db.execute('UPDATE instances SET worker_boot_id=? WHERE id=?', (boot, instance_id))
                 db.execute("UPDATE instance_start_operations SET phase='running',boot_id=? WHERE id=?", (boot, row['id']))
                 row = db.execute('SELECT * FROM instance_start_operations WHERE id=?', (row['id'],)).fetchone()
-            return self._start_result(row)
+            binding = resource_binding(access.get('resource_binding')) if isinstance(access, dict) else None
+            return self._start_result(row), binding
+
+    def _advance_start(self, principal, instance_id, request):
+        return self._advance_start_with_binding(principal, instance_id, request)[0]
 
     def start(self, principal, instance_id, body):
         if (not valid_id(instance_id) or not isinstance(body, dict) or set(body) != {'idempotency_key'}
@@ -459,7 +464,7 @@ class InstanceManager:
                 raise Error('INSTANCE_LIMIT', 409)
         deadline, items = time.monotonic() + 2, []
         for row in rows:
-            status, actions, editor_state = row['stop_phase'] or row['run_phase'] or 'created', [], 'not_started'
+            status, actions, editor_state, binding = row['stop_phase'] or row['run_phase'] or 'created', [], 'not_started', None
             current = row['station_id'] == self.authority.station_id and row['app_version'] in compatibility_for(self.authority).worker_versions
             if not current:
                 status = 'unknown'
@@ -484,7 +489,8 @@ class InstanceManager:
                         self._admit(db)
                         op = db.execute("SELECT runtime_request FROM instance_start_operations WHERE instance_id=? AND generation=? AND phase='starting'", (row['id'], row['generation'])).fetchone()
                     if op is not None:
-                        status = self._advance_start(principal, row['id'], decode(op['runtime_request'].encode()))['instance_state']
+                        started, binding = self._advance_start_with_binding(principal, row['id'], decode(op['runtime_request'].encode()))
+                        status = started['instance_state']
                 except Error:
                     pass
                 if status == 'running':
@@ -498,16 +504,26 @@ class InstanceManager:
                 remaining = deadline - time.monotonic()
                 if self.runtime is not None and remaining > 0:
                     try:
-                        self._access(principal, row['id'], timeout=remaining)
+                        proof = self._access(principal, row['id'], timeout=remaining)
+                        binding = resource_binding(proof.get('resource_binding')) if isinstance(proof, dict) else None
                         status = 'running'
                         actions = ['stop']
                         if self.frontend is not None and (self.frontend / 'vf-embed.html').is_file():
                             actions, editor_state = ['open', 'stop'], 'ready'
                     except Error:
                         pass  # An old successful start is not a current observation.
-            items.append({'instance_id': row['id'], 'alias': 'comfyui' + row['id'].replace('-', ''), 'name': row['name'],
-                          'status': status, 'observed_at': datetime.now(timezone.utc).isoformat(), 'access': 'manage',
-                          'allowed_actions': actions, 'editor_state': editor_state, 'package_profile': 'base', 'resources': {}})
+            resources = {}
+            if status == 'running':
+                for key, unit, scope in [('cpu', 'cores', 'instance_container'), ('memory', 'bytes', 'instance_container'),
+                                         ('gpu', 'bytes', 'exclusive_device'), ('storage', 'bytes', 'workspace_volume')]:
+                    resources[key] = {'value': None, 'request': None, 'limit': None, 'sampled_at': None,
+                                      'quality': 'unavailable', 'reason': 'METRICS_UNAVAILABLE', 'unit': unit, 'scope': scope}
+            item = {'instance_id': row['id'], 'alias': 'comfyui' + row['id'].replace('-', ''), 'name': row['name'],
+                    'status': status, 'observed_at': datetime.now(timezone.utc).isoformat(), 'access': 'manage',
+                    'allowed_actions': actions, 'editor_state': editor_state, 'package_profile': 'base', 'resources': resources}
+            if status == 'running' and binding is not None:
+                item['_resource_binding'] = binding
+            items.append(item)
         return {'schema_version': 1, 'allowed_actions': ['create'],
                 'profiles': [{'profile_id': 'base-cpu', 'name': '基础 CPU'}], 'instances': items}
 

@@ -157,13 +157,19 @@ class ManagedStartTest(unittest.TestCase):
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'starting')
         self.assertEqual(self.calls, [original])
         self.mode = 'ready'
-        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'running')
+        running = self.manager.directory(self.actor)['instances'][0]
+        self.assertEqual(running['status'], 'running')
+        self.assertEqual(running['_resource_binding']['container'], 'worker')
+        self.assertEqual(set(running['resources']), {'cpu', 'memory', 'gpu', 'storage'})
 
     def test_directory_requires_current_access_and_bounds_observation_without_dropping_instances(self):
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start', 'destroy'])
         self.mode = 'ready'
         self.start()
-        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'running')
+        running = self.manager.directory(self.actor)['instances'][0]
+        self.assertEqual(running['status'], 'running')
+        self.assertEqual(running['_resource_binding']['container'], 'worker')
+        self.assertEqual(set(running['resources']), {'cpu', 'memory', 'gpu', 'storage'})
         self.boot = str(uuid.uuid4())
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'unknown')
         self.accesses.clear()
