@@ -15,14 +15,16 @@ test('directory accepts zero/multiple instances and rejects identity ambiguity',
     assert.throws(() => readDirectory({ schema_version: 1, instances: items }), /INVALID_DIRECTORY/);
   }
 });
-test('page projection drops private addresses; open requires current state and declared capability', () => {
+test('page projection drops private addresses; open requires current state and declared capability regardless of client clock skew', () => {
   const [value] = readDirectory({ schema_version: 1, instances: [{ ...item(), editor_url: 'https://private.invalid', _resource_binding: {} }] });
   assert.equal('editor_url' in value, false);
   assert.equal('_resource_binding' in value, false);
-  assert.ok(canOpen(value, now));
-  assert.ok(!canOpen(value, now + 30001));
-  assert.ok(!canOpen({ ...value, status: 'stopped' }, now));
-  assert.ok(!canOpen({ ...value, allowedActions: [] }, now));
+  assert.ok(canOpen(value));
+  assert.ok(canOpen({ ...value, observedAt: new Date(now + 10000).toISOString() }));
+  assert.ok(canOpen({ ...value, observedAt: new Date(now - 60000).toISOString() }));
+  assert.ok(!canOpen({ ...value, status: 'stopped' }));
+  assert.ok(!canOpen({ ...value, editorState: 'unconfigured' }));
+  assert.ok(!canOpen({ ...value, allowedActions: [] }));
   assert.equal(filterInstances([value], 'INSTANCE-A').length, 1);
   assert.equal(filterInstances([value], '', 'running').length, 1);
   assert.equal(filterInstances([value], '', 'stopped').length, 0);
@@ -33,12 +35,13 @@ test('page projection drops private addresses; open requires current state and d
   const page2 = paginateInstances(many, 2, 10);
   assert.equal(page2.items.length, 3);
 });
-test('resource presentation distinguishes zero from missing and stale observations using em-dash', () => {
-  const metric = { quality: 'fresh', value: 0, sampled_at: new Date(now).toISOString() };
-  assert.equal(resourceText(metric, 'bytes', now), '0 B');
-  assert.equal(resourceText(metric, 'cores', now), '0 核');
-  assert.equal(resourceText(metric, 'cores', now + 30001), '—');
-  for (const value of [null, undefined, -1, NaN, '0']) assert.equal(resourceText({ ...metric, value }, 'bytes', now), '—');
+test('resource presentation distinguishes zero from missing and stale observations using server quality without client clock gating', () => {
+  const metric = { quality: 'fresh', value: 0, sampled_at: new Date(now + 10000).toISOString() };
+  assert.equal(resourceText(metric, 'bytes'), '0 B');
+  assert.equal(resourceText(metric, 'cores'), '0 核');
+  assert.equal(resourceText({ ...metric, quality: 'stale' }, 'cores'), '—');
+  assert.equal(resourceText({ ...metric, quality: 'unavailable' }, 'cores'), '—');
+  for (const value of [null, undefined, -1, NaN, '0']) assert.equal(resourceText({ ...metric, value }, 'bytes'), '—');
 });
 
 function fixture(request) {

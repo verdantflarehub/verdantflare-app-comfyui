@@ -85,24 +85,18 @@ export function paginateInstances(items, page = 1, pageSize = 10) {
 export function statusLabel(item) {
   return states[item.status] ?? states.unknown;
 }
-export function canOpen(item, now = Date.now()) {
-  const age = now - Date.parse(item.observedAt);
+export function canOpen(item) {
   return (
-    Number.isFinite(age) &&
-    age >= -5000 &&
-    age < 30000 &&
+    Boolean(item) &&
     item.status === 'running' &&
     item.editorState === 'ready' &&
+    Array.isArray(item.allowedActions) &&
     item.allowedActions.includes('open')
   );
 }
-export function resourceText(metric, unit, now = Date.now()) {
-  const age = now - Date.parse(metric?.sampled_at);
+export function resourceText(metric, unit) {
   if (
     metric?.quality !== 'fresh' ||
-    !Number.isFinite(age) ||
-    age < -5000 ||
-    age >= 30000 ||
     typeof metric.value !== 'number' ||
     !Number.isFinite(metric.value) ||
     metric.value < 0
