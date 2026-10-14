@@ -32,12 +32,11 @@ export function mountEditor({ instanceId, container, onStatus, request, assetURL
       const serialized = JSON.stringify(graph);
       if (stopped) return;
       if (serialized !== savedGraph) {
-        onStatus('saving', '正在保存实例草稿…');
         const result = await (await call('draft',{session_id:session,version,graph})).json();
         version = result.version; savedGraph = serialized;
       }
       savedGeneration = generation;
-      onStatus('ready','实例草稿已保存');
+      onStatus('ready','');
     });
     saving = operation;
     try { await operation; }
@@ -87,7 +86,7 @@ export function mountEditor({ instanceId, container, onStatus, request, assetURL
           try {
             if (stopped) return;
             ready = true; clearTimeout(loadTimer); frame.hidden = false; theme();
-            onStatus('ready','实例草稿已恢复');
+            onStatus('ready','');
             saveTimer = setInterval(()=>void save().catch(saveError), 1500);
           } catch (error) { fail(error); }
         }

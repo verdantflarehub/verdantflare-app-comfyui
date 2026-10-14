@@ -43,8 +43,8 @@ async function initialize(event) {
     if (lifetime.signal.aborted) return;
     editor = mountEditor({instanceId:launch.instanceId,container:document.getElementById('editor'),request,
       assetURL:path => launch.assetBaseUrl + path,
-      onStatus(state,message) { status.textContent = message; port.postMessage({kind:'status',state}); }});
-  } catch { status.textContent = 'ComfyUI 工作区加载失败，请关闭后重试。'; port.postMessage({kind:'status',state:'error'}); }
+      onStatus(state,message) { status.textContent = (state === 'ready' || state === 'saving') ? '' : message; status.hidden = !status.textContent; port.postMessage({kind:'status',state}); }});
+  } catch { status.hidden = false; status.textContent = 'ComfyUI 工作区加载失败，请关闭后重试。'; port.postMessage({kind:'status',state:'error'}); }
 }
 window.addEventListener('message',initialize);
 window.addEventListener('pagehide',dispose,{once:true});
