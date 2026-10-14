@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readDirectory, filterInstances, canOpen, resourceText, createDirectoryController,
+import { readDirectory, filterInstances, paginateInstances, canOpen, resourceText, createDirectoryController,
   createInstanceController, newCreateKey, readCreation, statusLabel, selectInitialWorkflow } from '../dashboard/model.mjs';
 
 const now = Date.now();
@@ -24,13 +24,21 @@ test('page projection drops private addresses; open requires current state and d
   assert.ok(!canOpen({ ...value, status: 'stopped' }, now));
   assert.ok(!canOpen({ ...value, allowedActions: [] }, now));
   assert.equal(filterInstances([value], 'INSTANCE-A').length, 1);
+  assert.equal(filterInstances([value], '', 'running').length, 1);
+  assert.equal(filterInstances([value], '', 'stopped').length, 0);
+  const many = Array.from({ length: 13 }, (_, idx) => ({ ...value, id: `inst-${idx}` }));
+  const page1 = paginateInstances(many, 1, 10);
+  assert.equal(page1.items.length, 10);
+  assert.equal(page1.totalPages, 2);
+  const page2 = paginateInstances(many, 2, 10);
+  assert.equal(page2.items.length, 3);
 });
-test('resource presentation distinguishes zero from missing and stale observations', () => {
+test('resource presentation distinguishes zero from missing and stale observations using em-dash', () => {
   const metric = { quality: 'fresh', value: 0, sampled_at: new Date(now).toISOString() };
   assert.equal(resourceText(metric, 'bytes', now), '0 B');
   assert.equal(resourceText(metric, 'cores', now), '0 核');
-  assert.equal(resourceText(metric, 'cores', now + 30001), '未采集');
-  for (const value of [null, undefined, -1, NaN, '0']) assert.equal(resourceText({ ...metric, value }, 'bytes', now), '未采集');
+  assert.equal(resourceText(metric, 'cores', now + 30001), '—');
+  for (const value of [null, undefined, -1, NaN, '0']) assert.equal(resourceText({ ...metric, value }, 'bytes', now), '—');
 });
 
 function fixture(request) {

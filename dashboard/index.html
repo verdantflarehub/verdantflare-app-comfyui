@@ -14,49 +14,128 @@
 <body data-embedded="true">
   <main id="dashboard"
         class="comfyui-dashboard">
-    <header class="intro">
-      <h1>ComfyUI</h1>
-      <p>管理实例，进入工作流创作环境。</p>
-    </header>
-    <div class="toolbar">
-      <label>搜索实例 <input id="search"
-               type="search"
-               placeholder="名称或标识"
-               autocomplete="off"></label>
-      <button id="refresh"
-              type="button">刷新</button>
-      <button id="create"
-              type="button"
-              hidden>创建实例</button>
+    <div class="filterbar">
+      <div id="filters"
+           class="filters"
+           aria-label="运行状态筛选">
+        <button type="button"
+                class="filter"
+                data-filter="all"
+                aria-pressed="true"><span>全部</span><span id="count-all"
+                class="filter-count">0</span></button>
+        <button type="button"
+                class="filter"
+                data-filter="running"
+                aria-pressed="false"><span>运行中</span><span id="count-running"
+                class="filter-count">0</span></button>
+        <button type="button"
+                class="filter"
+                data-filter="stopped"
+                aria-pressed="false"><span>已停止</span><span id="count-stopped"
+                class="filter-count">0</span></button>
+        <button type="button"
+                class="filter"
+                data-filter="failed"
+                aria-pressed="false"><span>异常</span><span id="count-failed"
+                class="filter-count">0</span></button>
+      </div>
+      <div class="filterbar-right">
+        <label class="search">
+          <span class="sr-only">搜索实例</span>
+          <svg class="icon"
+               viewBox="0 0 24 24"
+               fill="none"
+               stroke="currentColor"
+               stroke-width="1.6"
+               stroke-linecap="round"
+               stroke-linejoin="round"
+               aria-hidden="true">
+            <circle cx="10"
+                    cy="10"
+                    r="6" />
+            <path d="m15 15 5 5" />
+          </svg>
+          <input id="search"
+                 type="search"
+                 placeholder="搜索实例名称"
+                 autocomplete="off">
+        </label>
+        <button id="refresh"
+                class="btn"
+                type="button">刷新</button>
+        <button id="create"
+                class="btn primary"
+                type="button"
+                hidden>+ 创建实例</button>
+      </div>
     </div>
-    <form id="create-form" class="instance" hidden>
-      <h2>创建 ComfyUI 实例</h2>
-      <p>基础 CPU 环境。创建后处于未启动状态。</p>
-      <label>实例名称 <input id="create-name" required maxlength="80" autocomplete="off" placeholder="例如：工作流草稿"></label>
-      <p>初始工作流（可选）。选择文件后，点击创建才会保存到新实例。</p>
-      <div class="instance-actions">
-        <span id="workflow-name">使用空白工作流</span>
-        <button id="workflow-select" type="button">选择 JSON 工作流</button>
-        <button id="workflow-clear" type="button" hidden>移除</button>
-      </div>
-      <p id="create-message" role="status" aria-live="polite"></p>
-      <div class="instance-actions">
-        <button id="create-cancel" type="button">返回列表</button>
-        <button id="create-submit" type="submit">创建实例</button>
-      </div>
-    </form>
     <p id="message"
+       class="status-banner"
        role="status"
-       aria-live="polite">正在加载实例…</p>
+       aria-live="polite"
+       hidden>正在加载实例…</p>
     <div id="instances"
          aria-label="实例列表"></div>
-    <section id="detail"
-             hidden
-             aria-label="实例详情">
-      <button id="back"
-              type="button">返回实例列表</button>
-      <div id="detail-content"></div>
-    </section>
+
+    <dialog id="create-dialog"
+            class="dialog"
+            aria-labelledby="create-dialog-title">
+      <form id="create-form">
+        <h2 id="create-dialog-title">创建 ComfyUI 实例</h2>
+        <p class="dialog-desc">基础 CPU 环境。创建后处于「未启动」状态，不提前占用计算资源；需要时在列表中点击「启动」即可打开官方编辑器。</p>
+        <label class="field">
+          <span>实例名称</span>
+          <input id="create-name"
+                 required
+                 maxlength="80"
+                 autocomplete="off"
+                 placeholder="例如：ComfyUI 环境 01">
+        </label>
+        <div class="field">
+          <span>初始工作流（可选）</span>
+          <div class="workflow-picker">
+            <span id="workflow-name">使用空白工作流</span>
+            <div class="workflow-actions">
+              <button id="workflow-select"
+                      class="btn sm"
+                      type="button">选择 JSON 工作流</button>
+              <button id="workflow-clear"
+                      class="btn sm"
+                      type="button"
+                      hidden>移除</button>
+            </div>
+          </div>
+        </div>
+        <p id="create-message"
+           class="dialog-message"
+           role="status"
+           aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="create-cancel"
+                  class="btn"
+                  type="button">取消</button>
+          <button id="create-submit"
+                  class="btn primary"
+                  type="submit">创建实例</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="stop-dialog"
+            class="dialog"
+            aria-labelledby="stop-dialog-title">
+      <h2 id="stop-dialog-title">停止实例？</h2>
+      <p id="stop-dialog-desc"
+         class="dialog-desc">将停止运行容器并释放计算资源，实例草稿和工作卷保留。</p>
+      <div class="dialog-actions">
+        <button id="stop-cancel"
+                class="btn"
+                type="button">取消</button>
+        <button id="stop-confirm"
+                class="btn primary"
+                type="button">确认停止</button>
+      </div>
+    </dialog>
   </main>
   <script type="module"
           src="./dashboard.mjs"></script>
