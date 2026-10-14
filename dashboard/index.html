@@ -136,6 +136,29 @@
                 type="button">确认停止</button>
       </div>
     </dialog>
+
+    <dialog id="destroy-dialog"
+            class="dialog"
+            aria-labelledby="destroy-dialog-title">
+      <h2 id="destroy-dialog-title">销毁实例？</h2>
+      <p id="destroy-dialog-desc"
+         class="dialog-desc">销毁后该实例将从列表移除；已绑定的工作卷保留，由存储管理独立释放。</p>
+      <label class="field">
+        <span>输入实例名称确认</span>
+        <input id="destroy-name"
+               autocomplete="off"
+               placeholder="">
+      </label>
+      <div class="dialog-actions">
+        <button id="destroy-cancel"
+                class="btn"
+                type="button">取消</button>
+        <button id="destroy-confirm"
+                class="btn danger"
+                type="button"
+                disabled>确认销毁</button>
+      </div>
+    </dialog>
   </main>
   <script type="module"
           src="./dashboard.mjs"></script>

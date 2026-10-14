@@ -53,8 +53,12 @@ class InstanceManager:
                 id TEXT PRIMARY KEY REFERENCES instances(id), installation_id TEXT NOT NULL,
                 station_id TEXT NOT NULL, app_version TEXT NOT NULL, name TEXT NOT NULL,
                 profile_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state='created'),
-                create_operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+                create_operation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+                destroyed_at TEXT
             )''')
+            cols = {r[1] for r in db.execute('PRAGMA table_info(managed_instances)')}
+            if 'destroyed_at' not in cols:
+                db.execute('ALTER TABLE managed_instances ADD COLUMN destroyed_at TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS instance_create_operations (
                 id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, organization_id TEXT NOT NULL,
                 owner_id TEXT NOT NULL, request_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -81,11 +85,17 @@ class InstanceManager:
                 phase TEXT NOT NULL CHECK(phase IN ('stopping','stopped')), created_ns INTEGER NOT NULL,
                 UNIQUE(installation_id,organization_id,owner_id,request_key)
             )''')
+            db.execute('''CREATE TABLE IF NOT EXISTS instance_destroy_operations (
+                id TEXT PRIMARY KEY, instance_id TEXT NOT NULL UNIQUE REFERENCES managed_instances(id),
+                installation_id TEXT NOT NULL, organization_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+                request_key TEXT NOT NULL, response TEXT NOT NULL, created_ns INTEGER NOT NULL,
+                UNIQUE(installation_id,organization_id,owner_id,request_key)
+            )''')
 
     def _managed(self, db, principal, instance_id):
         row = db.execute('''SELECT m.*,i.generation,i.worker_boot_id,i.draining FROM managed_instances m
             JOIN instances i ON i.id=m.id WHERE m.id=? AND m.installation_id=?
-            AND i.organization_id=? AND i.owner_id=?''',
+            AND i.organization_id=? AND i.owner_id=? AND m.destroyed_at IS NULL''',
                          (instance_id, self.authority.installation_id, principal.organization_id, principal.user_id)).fetchone()
         if not row:
             raise Error('NOT_FOUND', 404)
@@ -261,6 +271,43 @@ class InstanceManager:
                                 canonical(request), 'stopping', time.time_ns()))
         return self._advance_stop(principal, instance_id, request, deadline=time.monotonic() + 2)
 
+    def destroy(self, principal, instance_id, body):
+        if (not valid_id(instance_id) or not isinstance(body, dict) or set(body) != {'idempotency_key'}
+                or not valid_id(body['idempotency_key'])):
+            raise Error('INVALID_INSTANCE_DESTROY')
+        self.authorize(principal)
+        if self.runtime is None:
+            raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+        scope = (self.authority.installation_id, principal.organization_id, principal.user_id)
+        with self.store.transaction() as db:
+            prior = db.execute('''SELECT instance_id,response FROM instance_destroy_operations WHERE installation_id=?
+                AND organization_id=? AND owner_id=? AND request_key=?''', (*scope, body['idempotency_key'])).fetchone()
+            if prior:
+                if prior['instance_id'] != instance_id:
+                    raise Error('IDEMPOTENCY_CONFLICT', 409)
+                return decode(prior['response'].encode())
+            instance = self._managed(db, principal, instance_id)
+            self._admit(db)
+            latest = db.execute('SELECT * FROM instance_start_operations WHERE instance_id=? ORDER BY generation DESC LIMIT 1', (instance_id,)).fetchone()
+            if latest:
+                stopped = db.execute("SELECT 1 FROM instance_stop_operations WHERE start_operation_id=? AND phase='stopped'", (latest['id'],)).fetchone()
+                if not stopped:
+                    raise Error('INSTANCE_NOT_STOPPED', 409)
+                if latest['generation'] != instance['generation'] or instance['worker_boot_id'] is not None or not instance['draining']:
+                    raise Error('STALE_GENERATION', 409)
+            elif instance['draining'] or instance['worker_boot_id'] is not None or instance['generation'] != 1:
+                raise Error('STALE_GENERATION', 409)
+            operation = request_id()
+            now = datetime.now(timezone.utc).isoformat()
+            result = {'schema_version': 1, 'operation_id': operation, 'action': 'destroy', 'status': 'succeeded',
+                      'instance_id': instance_id, 'instance_state': 'destroyed'}
+            # Destroying an instance only marks the App directory record destroyed;
+            # workspace volume bindings remain untouched for storage management to release.
+            db.execute('UPDATE managed_instances SET destroyed_at=? WHERE id=?', (now, instance_id))
+            db.execute('INSERT INTO instance_destroy_operations VALUES (?,?,?,?,?,?,?,?)',
+                       (operation, instance_id, *scope, body['idempotency_key'], canonical(result), time.time_ns()))
+            return result
+
     def authorize(self, principal):
         self.authority.check(principal)
 
@@ -349,7 +396,7 @@ class InstanceManager:
                 return decode(prior['response'].encode())
             self._admit(db)
             count = db.execute('''SELECT count(*) FROM managed_instances m JOIN instances i ON i.id=m.id
-                WHERE m.installation_id=? AND i.organization_id=? AND i.owner_id=?''', scope).fetchone()[0]
+                WHERE m.installation_id=? AND i.organization_id=? AND i.owner_id=? AND m.destroyed_at IS NULL''', scope).fetchone()[0]
             if count >= 1000:
                 raise Error('INSTANCE_LIMIT', 409)
             instance, operation = request_id(), request_id()
@@ -358,7 +405,9 @@ class InstanceManager:
                       'instance_id': instance, 'instance_state': 'created'}
             db.execute('INSERT INTO instances(id,organization_id,owner_id) VALUES (?,?,?)',
                        (instance, principal.organization_id, principal.user_id))
-            db.execute('INSERT INTO managed_instances VALUES (?,?,?,?,?,?,?,?,?)',
+            db.execute('''INSERT INTO managed_instances
+                (id,installation_id,station_id,app_version,name,profile_id,state,create_operation_id,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)''',
                        (instance, installation, self.authority.station_id, compatibility_for(self.authority).default_worker_version,
                         body['name'], body['profile_id'], 'created', operation, now))
             db.execute('INSERT INTO instance_create_operations VALUES (?,?,?,?,?,?,?,?)',
@@ -376,6 +425,11 @@ class InstanceManager:
                 AND installation_id=? AND organization_id=? AND owner_id=?''',
                              (operation_id, self.authority.installation_id, principal.organization_id, principal.user_id)).fetchone()
             if not row:
+                destroyed = db.execute('''SELECT response FROM instance_destroy_operations WHERE id=?
+                    AND installation_id=? AND organization_id=? AND owner_id=?''',
+                                       (operation_id, self.authority.installation_id, principal.organization_id, principal.user_id)).fetchone()
+                if destroyed:
+                    return decode(destroyed['response'].encode())
                 start = db.execute('''SELECT * FROM instance_start_operations WHERE id=?
                     AND installation_id=? AND organization_id=? AND owner_id=?''',
                                    (operation_id, self.authority.installation_id, principal.organization_id, principal.user_id)).fetchone()
@@ -398,7 +452,8 @@ class InstanceManager:
                 FROM managed_instances m JOIN instances i ON i.id=m.id
                 LEFT JOIN instance_start_operations s ON s.instance_id=m.id AND s.generation=i.generation
                 LEFT JOIN instance_stop_operations o ON o.start_operation_id=s.id
-                WHERE m.installation_id=? AND i.organization_id=? AND i.owner_id=? ORDER BY m.created_at,m.id LIMIT 1001''',
+                WHERE m.installation_id=? AND i.organization_id=? AND i.owner_id=? AND m.destroyed_at IS NULL
+                ORDER BY m.created_at,m.id LIMIT 1001''',
                               (self.authority.installation_id, principal.organization_id, principal.user_id)).fetchall()
             if len(rows) > 1000:
                 raise Error('INSTANCE_LIMIT', 409)
@@ -411,7 +466,7 @@ class InstanceManager:
             elif status == 'created' and (row['generation'] != 1 or row['worker_boot_id'] is not None or row['draining']):
                 status = 'unknown'
             elif status == 'created' and self.runtime is not None:
-                actions = ['start']
+                actions = ['start', 'destroy']
             elif status == 'stopping' and self.runtime is not None and deadline - time.monotonic() > 0:
                 try:
                     with self.store.transaction() as db:
@@ -422,7 +477,7 @@ class InstanceManager:
                 except Error:
                     pass
                 if status == 'stopped':
-                    actions = ['start']
+                    actions = ['start', 'destroy']
             elif status == 'starting' and self.runtime is not None and deadline - time.monotonic() > 0:
                 try:
                     with self.store.transaction() as db:
@@ -437,7 +492,7 @@ class InstanceManager:
                     if self.frontend is not None and (self.frontend / 'vf-embed.html').is_file():
                         actions, editor_state = ['open', 'stop'], 'ready'
             elif status == 'stopped' and self.runtime is not None:
-                actions = ['start']
+                actions = ['start', 'destroy']
             elif status == 'running':
                 status, editor_state = 'unknown', 'unavailable'
                 remaining = deadline - time.monotonic()

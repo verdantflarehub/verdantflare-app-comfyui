@@ -191,6 +191,20 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual(self.handler('GET', '/internal/dashboard/operations/' + result['operation_id']), (200, result))
         self.assertEqual(self.handler('POST', path + '?force=true', {'idempotency_key': request_id()})[0], 404)
 
+    def test_destroy_route_returns_200_and_removes_instance_from_directory(self):
+        instance = self.create()['instance_id']
+        path = '/internal/dashboard/instances/' + instance + '/destroy'
+        body = {'idempotency_key': request_id()}
+        self.assertEqual(self.handler('POST', path, body)[0], 503)
+        self.manager.runtime = SimpleNamespace()
+        status, result = self.handler('POST', path, body)
+        self.assertEqual(status, 200)
+        self.assertEqual(result['action'], 'destroy')
+        self.assertEqual(result['instance_state'], 'destroyed')
+        self.assertEqual(len(result), 6)
+        self.assertEqual(self.handler('GET', '/internal/dashboard/operations/' + result['operation_id']), (200, result))
+        self.assertEqual(self.handler('GET', '/internal/dashboard/instances')[1]['instances'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

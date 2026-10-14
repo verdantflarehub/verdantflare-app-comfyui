@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createStopController } from '../dashboard/model.mjs';
+import { createStopController, createDestroyController } from '../dashboard/model.mjs';
 
 const instanceId = '01900000-0000-7000-8000-000000000002';
 const operationId = '01900000-0000-7000-8000-000000000003';
@@ -88,4 +88,40 @@ test('hidden response does not erase the stop recovery record', async () => {
   const request = page.submit(); page.emit('hidden'); finish(reply(true)); await request;
   assert.ok(page.snapshot().pending); assert.equal(page.snapshot().result, null);
   page.dispose(); assert.equal(page.values.size, 1);
+});
+
+test('destroy controller posts idempotency key to /instances/:id/destroy and reuses key on retry', async () => {
+  const calls = [], listeners = new Set(), snapshots = [];
+  let fail = true;
+  const sdk = {
+    app: {
+      request: async input => {
+        calls.push(input);
+        if (fail) throw Error('offline');
+        return {
+          status: 200,
+          data: {
+            schema_version: 1,
+            operation_id: operationId,
+            action: 'destroy',
+            status: 'succeeded',
+            instance_id: instanceId,
+            instance_state: 'destroyed',
+          },
+        };
+      },
+    },
+    lifecycle: { subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); } },
+  };
+  const controller = createDestroyController(sdk, s => snapshots.push(s), { instanceId, newKey: () => key });
+  await controller.submit();
+  assert.equal(controller.snapshot().error, 'DESTROY_FAILED');
+  fail = false;
+  await controller.submit();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], calls[1]);
+  assert.equal(calls[0].path, `/instances/${instanceId}/destroy`);
+  assert.equal(controller.snapshot().result.instance_state, 'destroyed');
+  controller.dispose();
+  assert.equal(listeners.size, 0);
 });

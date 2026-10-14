@@ -95,11 +95,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             start_prefix = '/internal/dashboard/instances/'
             if self.path.startswith(start_prefix):
                 parts = self.path[len(start_prefix):].split('/')
-                if len(parts) != 2 or parts[1] not in ('start', 'stop'):
+                if len(parts) != 2 or parts[1] not in ('start', 'stop', 'destroy'):
                     raise Error('NOT_FOUND', 404)
                 if manager is None:
                     raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
-                action = manager.start if parts[1] == 'start' else manager.stop
+                action = getattr(manager, parts[1])
                 result = action(principal, parts[0], self.body())
                 return self.reply(200 if result['status'] == 'succeeded' else 202, result)
             if manager is not None and self.path == '/internal/workspace/resolve':

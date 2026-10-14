@@ -69,7 +69,7 @@ class ManagedStopTest(unittest.TestCase):
         self.assertEqual(stopped['instance_state'], 'stopped')
         self.assertEqual(self.stops[0], self.stops[1])
         self.assertEqual(self.manager.operation(self.actor, stopped['operation_id']), stopped)
-        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start'])
+        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start', 'destroy'])
         self.boot = str(uuid.uuid4())
         self.manager.start(self.actor, self.instance, {'idempotency_key': request_id()})
         self.assertEqual(self.starts[-1]['generation'], 2)
@@ -151,11 +151,39 @@ class ManagedStopTest(unittest.TestCase):
         self.mode = 'ready'
         items = self.manager.directory(self.actor)['instances']
         self.assertEqual(items[0]['status'], 'stopped')
-        self.assertEqual(items[0]['allowed_actions'], ['start'])
+        self.assertEqual(items[0]['allowed_actions'], ['start', 'destroy'])
         result = self.stop()
         self.assertEqual(result['operation_id'], operation)
         self.assertEqual(result['instance_state'], 'stopped')
         self.assertEqual(self.stops[0], self.stops[2])
+
+    def test_destroy_created_and_stopped_instances_without_touching_runtime(self):
+        with self.assertRaisesRegex(Error, 'INSTANCE_NOT_STOPPED'):
+            self.manager.destroy(self.actor, self.instance, {'idempotency_key': request_id()})
+        self.stop()
+        with self.assertRaisesRegex(Error, 'INSTANCE_NOT_STOPPED'):
+            self.manager.destroy(self.actor, self.instance, {'idempotency_key': request_id()})
+        self.mode = 'ready'
+        self.stop()
+        destroy_key = request_id()
+        destroyed = self.manager.destroy(self.actor, self.instance, {'idempotency_key': destroy_key})
+        self.assertEqual(destroyed['action'], 'destroy')
+        self.assertEqual(destroyed['status'], 'succeeded')
+        self.assertEqual(destroyed['instance_state'], 'destroyed')
+        self.assertEqual(destroyed['instance_id'], self.instance)
+        self.assertEqual(self.manager.destroy(self.actor, self.instance, {'idempotency_key': destroy_key}), destroyed)
+        self.assertEqual(self.manager.operation(self.actor, destroyed['operation_id']), destroyed)
+        self.assertEqual(self.manager.directory(self.actor)['instances'], [])
+        with self.assertRaisesRegex(Error, 'NOT_FOUND'):
+            self.manager.destroy(self.actor, self.instance, {'idempotency_key': request_id()})
+        with self.assertRaisesRegex(Error, 'NOT_FOUND'):
+            self.manager.start(self.actor, self.instance, {'idempotency_key': request_id()})
+        unstarted = self.manager.create(self.actor, {'idempotency_key': request_id(), 'name': 'B', 'profile_id': 'base-cpu'})['instance_id']
+        with self.assertRaisesRegex(Error, 'IDEMPOTENCY_CONFLICT'):
+            self.manager.destroy(self.actor, unstarted, {'idempotency_key': destroy_key})
+        unstarted_destroyed = self.manager.destroy(self.actor, unstarted, {'idempotency_key': request_id()})
+        self.assertEqual(unstarted_destroyed['instance_state'], 'destroyed')
+        self.assertEqual(self.manager.directory(self.actor)['instances'], [])
 
 
 if __name__ == '__main__':

@@ -160,7 +160,7 @@ class ManagedStartTest(unittest.TestCase):
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'running')
 
     def test_directory_requires_current_access_and_bounds_observation_without_dropping_instances(self):
-        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start'])
+        self.assertEqual(self.manager.directory(self.actor)['instances'][0]['allowed_actions'], ['start', 'destroy'])
         self.mode = 'ready'
         self.start()
         self.assertEqual(self.manager.directory(self.actor)['instances'][0]['status'], 'running')

@@ -625,3 +625,92 @@ function createRunOperationController(
   }
   return { submit, sync, snapshot, dispose };
 }
+
+export function createDestroyController(
+  sdk,
+  onChange,
+  { instanceId, newKey = newCreateKey },
+) {
+  if (!uuid7.test(instanceId)) throw Error('INVALID_INSTANCE');
+  let idempotencyKey = null,
+    busy = false,
+    disposed = false,
+    visible = true,
+    error = '',
+    result = null,
+    request;
+  const snapshot = () => ({ busy, error, result });
+  const emit = () => {
+    if (!disposed) onChange(snapshot());
+  };
+  async function submit() {
+    if (disposed || !visible || busy) return;
+    if (!idempotencyKey) {
+      try {
+        const key = newKey();
+        if (typeof key !== 'string' || !uuid7.test(key)) throw Error();
+        idempotencyKey = key;
+      } catch {
+        error = 'DESTROY_FAILED';
+        emit();
+        return;
+      }
+    }
+    busy = true;
+    error = '';
+    result = null;
+    request?.abort();
+    request = new AbortController();
+    emit();
+    const signal = request.signal;
+    try {
+      const response = await sdk.app.request(
+        {
+          method: 'POST',
+          path: `/instances/${instanceId}/destroy`,
+          body: { idempotency_key: idempotencyKey },
+        },
+        { signal },
+      );
+      if (disposed || signal.aborted) return;
+      const data = response.data;
+      if (
+        response.status !== 200 ||
+        !data ||
+        Object.keys(data).length !== 6 ||
+        data.schema_version !== 1 ||
+        data.action !== 'destroy' ||
+        data.status !== 'succeeded' ||
+        data.instance_id !== instanceId ||
+        data.instance_state !== 'destroyed' ||
+        typeof data.operation_id !== 'string' ||
+        !uuid7.test(data.operation_id)
+      )
+        throw Error();
+      result = Object.freeze({ ...data });
+    } catch {
+      if (!disposed && !signal.aborted) error = 'DESTROY_FAILED';
+    } finally {
+      busy = false;
+      request = undefined;
+      emit();
+    }
+  }
+  const unsubscribe = sdk.lifecycle.subscribe((event) => {
+    if (event === 'dispose') dispose();
+    else if (event === 'hidden') {
+      visible = false;
+      request?.abort();
+    } else {
+      visible = true;
+    }
+  });
+  function dispose() {
+    if (!disposed) {
+      disposed = true;
+      request?.abort();
+      unsubscribe();
+    }
+  }
+  return { submit, snapshot, dispose };
+}

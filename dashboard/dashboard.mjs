@@ -3,6 +3,7 @@ import {
   createInstanceController,
   createStartController,
   createStopController,
+  createDestroyController,
   selectInitialWorkflow,
   filterInstances,
   paginateInstances,
@@ -31,6 +32,7 @@ let snapshot = { items: [], state: 'loading', error: '', creation: false },
   statusFilter = 'all',
   page = 1,
   stopTargetId = null,
+  destroyTargetId = null,
   disposed = false;
 let creation = { pending: null, busy: false, error: '', result: null };
 let workflow = null,
@@ -39,6 +41,7 @@ let workflow = null,
 const events = new AbortController();
 const starters = new Map();
 const stoppers = new Map();
+const destroyers = new Map();
 
 function showModal(dialog) {
   if (!dialog || dialog.open) return;
@@ -68,7 +71,10 @@ function closeModal(dialog) {
 
 function updateSize() {
   if (disposed) return;
-  const dialogOpen = $('create-dialog')?.open || $('stop-dialog')?.open;
+  const dialogOpen =
+    $('create-dialog')?.open ||
+    $('stop-dialog')?.open ||
+    $('destroy-dialog')?.open;
   const height = Math.ceil(root.getBoundingClientRect().height);
   bridge?.resize?.(dialogOpen ? Math.max(height, 480) : height);
 }
@@ -83,8 +89,10 @@ function badgeClass(status) {
 function row(item) {
   const start = starters.get(item.instanceId)?.snapshot();
   const stop = stoppers.get(item.instanceId)?.snapshot();
+  const destroy = destroyers.get(item.instanceId)?.snapshot();
   const isStopping = item.status === 'stopping' || Boolean(stop?.busy);
   const isStarting = item.status === 'starting' || Boolean(start?.busy);
+  const isDestroying = Boolean(destroy?.busy);
   const effectiveStatus = isStopping
     ? 'stopping'
     : isStarting
@@ -94,14 +102,26 @@ function row(item) {
     snapshot.state === 'ready' &&
     !isStarting &&
     !isStopping &&
+    !isDestroying &&
     (item.allowedActions.includes('start') || Boolean(start?.pending));
   const canStop =
     snapshot.state === 'ready' &&
     !isStopping &&
     !isStarting &&
+    !isDestroying &&
     (item.allowedActions.includes('stop') || Boolean(stop?.pending));
+  const canDestroy =
+    snapshot.state === 'ready' &&
+    !isStarting &&
+    !isStopping &&
+    !isDestroying &&
+    item.allowedActions.includes('destroy');
   const openAllowed =
-    snapshot.state === 'ready' && !isStopping && !isStarting && canOpen(item);
+    snapshot.state === 'ready' &&
+    !isStopping &&
+    !isStarting &&
+    !isDestroying &&
+    canOpen(item);
 
   const startMessage =
     start?.error === 'START_RECOVERY_UNAVAILABLE'
@@ -117,7 +137,8 @@ function row(item) {
         : stop?.error
           ? '停止失败，请重试。'
           : '';
-  const note = stopMessage || startMessage;
+  const destroyMessage = destroy?.error ? '销毁失败，请重试。' : '';
+  const note = destroyMessage || stopMessage || startMessage;
   const noteError = Boolean(note);
 
   const isRunning = effectiveStatus === 'running';
@@ -129,7 +150,11 @@ function row(item) {
     ? `<button type="button" class="instance-name" data-open="${esc(item.instanceId)}">${esc(item.name)}</button>`
     : `<span class="instance-name">${esc(item.name)}</span>`;
 
-  const destroyBtn = `<button type="button" class="btn sm danger" disabled title="${isRunning || isStopping || isStarting ? '请先停止实例' : '实例销毁暂未开放'}">销毁</button>`;
+  const destroyBtn = isDestroying
+    ? `<button type="button" class="btn sm danger" data-destroy="${esc(item.instanceId)}" disabled>销毁中…</button>`
+    : canDestroy
+      ? `<button type="button" class="btn sm danger" data-destroy="${esc(item.instanceId)}">销毁</button>`
+      : `<button type="button" class="btn sm danger" disabled title="${isRunning || isStopping || isStarting ? '请先停止实例' : '当前状态不可销毁'}">销毁</button>`;
   const startBtn = isStarting
     ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" disabled>启动中…</button>`
     : canStart || start?.error
@@ -314,6 +339,19 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
             },
           ),
         );
+      if (!destroyers.has(item.instanceId))
+        destroyers.set(
+          item.instanceId,
+          createDestroyController(
+            sdk,
+            (state) => {
+              render();
+              if (state.result?.status === 'succeeded')
+                void controller.refresh();
+            },
+            { instanceId: item.instanceId },
+          ),
+        );
       starters.get(item.instanceId)?.sync?.(item.status);
       stoppers.get(item.instanceId)?.sync?.(item.status);
     }
@@ -458,6 +496,46 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
     },
     { signal: events.signal },
   );
+  $('destroy-name').addEventListener(
+    'input',
+    () => {
+      const item = snapshot.items.find((i) => i.instanceId === destroyTargetId);
+      $('destroy-confirm').disabled =
+        !item || $('destroy-name').value !== item.name;
+    },
+    { signal: events.signal },
+  );
+  $('destroy-cancel').addEventListener(
+    'click',
+    () => {
+      destroyTargetId = null;
+      $('destroy-name').value = '';
+      $('destroy-confirm').disabled = true;
+      closeModal($('destroy-dialog'));
+    },
+    { signal: events.signal },
+  );
+  $('destroy-confirm').addEventListener(
+    'click',
+    async () => {
+      const targetId = destroyTargetId;
+      const item = snapshot.items.find((i) => i.instanceId === targetId);
+      if (!item || $('destroy-name').value !== item.name) return;
+      destroyTargetId = null;
+      $('destroy-name').value = '';
+      $('destroy-confirm').disabled = true;
+      closeModal($('destroy-dialog'));
+      const destroyer = destroyers.get(targetId);
+      if (
+        destroyer &&
+        snapshot.state === 'ready' &&
+        item.allowedActions.includes('destroy')
+      ) {
+        await destroyer.submit();
+      }
+    },
+    { signal: events.signal },
+  );
   $('filters').addEventListener(
     'click',
     (event) => {
@@ -533,6 +611,24 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
           }
         }
       }
+      if (button.dataset.destroy) {
+        const item = snapshot.items.find(
+          (item) => item.instanceId === button.dataset.destroy,
+        );
+        if (
+          item &&
+          snapshot.state === 'ready' &&
+          item.allowedActions.includes('destroy')
+        ) {
+          destroyTargetId = item.instanceId;
+          $('destroy-dialog-title').textContent = `销毁 ${item.name}？`;
+          $('destroy-name').value = '';
+          $('destroy-name').placeholder = item.name;
+          $('destroy-confirm').disabled = true;
+          showModal($('destroy-dialog'));
+          $('destroy-name').focus();
+        }
+      }
       if (button.dataset.open) {
         const item = snapshot.items.find(
           (item) => item.instanceId === button.dataset.open,
@@ -574,8 +670,10 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
     creator.dispose();
     for (const starter of starters.values()) starter.dispose();
     for (const stopper of stoppers.values()) stopper.dispose();
+    for (const destroyer of destroyers.values()) destroyer.dispose();
     starters.clear();
     stoppers.clear();
+    destroyers.clear();
     resize.disconnect();
     events.abort();
     unsubscribe();
