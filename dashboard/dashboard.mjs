@@ -26,18 +26,18 @@ const esc = (value) =>
       ],
   );
 const nodesIcon =
-  '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6v6H4zM14 14h6v6h-6zM14 4h6v6h-6zM7 10v7h7M10 7h4"/></svg>';
+  '<svg viewBox="0 0 84 84" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="84" height="84" rx="18" fill="#172DD7"/><path d="M28.5899 69.2727C27.3242 69.2727 26.303 68.8023 25.637 67.9128C24.9524 66.9989 24.774 65.723 25.1471 64.4133L26.6455 59.1518C26.765 58.7329 26.6818 58.2821 26.4212 57.9336C26.1606 57.5858 25.7529 57.381 25.3198 57.381H21.0116C19.7453 57.381 18.724 56.9112 18.0583 56.0218C17.3738 55.1072 17.1953 53.8314 17.5687 52.5216L22.7163 34.5286L23.2847 32.5517C24.0487 29.869 26.8349 27.6888 29.4966 27.6888H34.6517C35.2668 27.6888 35.8079 27.2787 35.9773 26.6835L37.6821 20.6987C38.4453 18.0187 41.2316 15.8385 43.8933 15.8385L54.9181 15.8189L62.9891 15.8182C64.2551 15.8182 65.2763 16.288 65.942 17.1774C66.6265 18.0913 66.805 19.3672 66.4319 20.6769L64.124 28.7803C63.3611 31.4595 60.5748 33.6391 57.9131 33.6391L46.8637 33.6601H41.7104C41.0959 33.6601 40.5555 34.0695 40.3851 34.6641L36.0883 49.6722C35.9681 50.0919 36.0513 50.5441 36.3126 50.8925C36.5732 51.2403 36.9809 51.445 37.4136 51.445L44.7152 51.4308H52.7622C54.0282 51.4308 55.0494 51.9006 55.7151 52.7901C56.3996 53.7046 56.5781 54.9805 56.2047 56.2902L53.8969 64.3923C53.1339 67.0722 50.3476 69.2517 47.686 69.2517L36.6369 69.2727H28.5899Z" fill="#F0FF41"/></svg>';
 const actionIcons = {
   destroy:
-    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M5.5 4V2.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V4M4 4l.7 9.2c0 .5.4.8.9.8h4.8c.5 0 .9-.3.9-.8L12 4M6.8 6.8v4.4M9.2 6.8v4.4"/></svg>',
+    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>',
   stop:
-    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" fill-opacity="0.18"/></svg>',
+    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
   play:
-    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.6l7.5 4.4L5 12.4V3.6z" fill="currentColor" fill-opacity="0.18"/></svg>',
+    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg>',
   spin:
-    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/></svg>',
+    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>',
   open:
-    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3.5H3.8A1.3 1.3 0 0 0 2.5 4.8v7.4a1.3 1.3 0 0 0 1.3 1.3h7.4a1.3 1.3 0 0 0 1.3-1.3V9.5M9.5 2.5h4v4M13.2 2.8L7.5 8.5"/></svg>',
+    '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
 };
 
 let snapshot = { items: [], state: 'loading', error: '', creation: false },
@@ -93,9 +93,29 @@ function updateSize() {
 
 function badgeClass(status) {
   if (status === 'running') return 'running';
-  if (status === 'starting' || status === 'stopping') return status;
-  if (status === 'failed') return 'failed';
+  if (status === 'starting' || status === 'stopping') return 'working ' + status;
+  if (status === 'failed' || status === 'unknown') return 'failed';
   return '';
+}
+
+function meterBar(metric, label, isRunning) {
+  if (!isRunning || metric?.quality !== 'fresh') return '';
+  const limit =
+    Number.isFinite(metric?.limit) && metric.limit > 0
+      ? metric.limit
+      : Number.isFinite(metric?.request) && metric.request > 0
+        ? metric.request
+        : null;
+  if (
+    !limit ||
+    typeof metric?.value !== 'number' ||
+    !Number.isFinite(metric.value) ||
+    metric.value < 0
+  )
+    return '';
+  const pct = Math.min(100, Math.max(0, Math.round((metric.value / limit) * 100)));
+  const cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : '';
+  return `<div class="vf-meter ${cls}" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="transform:scaleX(${Math.min(1, pct / 100)})"></span></div>`;
 }
 
 function row(item) {
@@ -161,45 +181,47 @@ function row(item) {
   const nameCell = openAllowed
     ? `<button type="button" class="instance-name" data-open="${esc(item.instanceId)}">${esc(item.name)}</button>`
     : `<span class="instance-name">${esc(item.name)}</span>`;
+  const subText = `${item.alias} · ${item.packageProfile === 'base' ? '基础 CPU 环境' : '节点工作流环境'} · 独立工作卷`;
 
   const destroyTitle = isDestroying
     ? '销毁中…'
     : canDestroy
       ? `销毁 ${item.name}`
       : isRunning || isStopping || isStarting
-        ? '运行或过渡中的实例不可直接销毁，请先停止实例'
+        ? '请先停止实例，再销毁'
         : '当前状态不可销毁';
   const destroyBtn = isDestroying
-    ? `<button type="button" class="btn g-icon-button danger" data-destroy="${esc(item.instanceId)}" disabled aria-busy="true" title="销毁中…" aria-label="销毁中…">${actionIcons.spin}</button>`
-    : `<button type="button" class="btn g-icon-button danger" ${canDestroy ? `data-destroy="${esc(item.instanceId)}"` : 'disabled'} title="${esc(destroyTitle)}" aria-label="${esc(destroyTitle)}">${actionIcons.destroy}</button>`;
+    ? `<button type="button" data-vf="Button" class="btn g-icon-button quiet danger" data-destroy="${esc(item.instanceId)}" disabled aria-busy="true" title="销毁中…" aria-label="销毁中…">${actionIcons.spin}</button>`
+    : `<button type="button" data-vf="Button" class="btn g-icon-button quiet danger" ${canDestroy ? `data-destroy="${esc(item.instanceId)}"` : 'disabled'} title="${esc(destroyTitle)}" aria-label="${esc(destroyTitle)}">${actionIcons.destroy}</button>`;
 
   const startDisabled = !canStart || start?.error === 'START_RECOVERY_UNAVAILABLE';
   const stopDisabled = !canStop || stop?.error === 'STOP_RECOVERY_UNAVAILABLE';
   const lifecycleBtn = isStarting
-    ? `<button type="button" class="btn g-icon-button" data-start="${esc(item.instanceId)}" disabled aria-busy="true" title="启动中…" aria-label="启动中…">${actionIcons.spin}</button>`
+    ? `<button type="button" data-vf="Button" class="btn g-icon-button" data-start="${esc(item.instanceId)}" disabled aria-busy="true" title="启动中…" aria-label="启动中…">${actionIcons.spin}</button>`
     : isStopping
-      ? `<button type="button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" disabled aria-busy="true" title="停止中…" aria-label="停止中…">${actionIcons.spin}</button>`
+      ? `<button type="button" data-vf="Button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" disabled aria-busy="true" title="停止中…" aria-label="停止中…">${actionIcons.spin}</button>`
       : canStop || stop?.error || isRunning
-        ? `<button type="button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" ${stopDisabled ? 'disabled' : ''} title="停止 ${esc(item.name)}" aria-label="停止 ${esc(item.name)}">${actionIcons.stop}</button>`
-        : `<button type="button" class="btn g-icon-button" data-start="${esc(item.instanceId)}" ${startDisabled ? 'disabled' : ''} title="启动 ${esc(item.name)}" aria-label="启动 ${esc(item.name)}">${actionIcons.play}</button>`;
+        ? `<button type="button" data-vf="Button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" ${stopDisabled ? 'disabled' : ''} title="停止 ${esc(item.name)}" aria-label="停止 ${esc(item.name)}">${actionIcons.stop}</button>`
+        : `<button type="button" data-vf="Button" class="btn g-icon-button ${!startDisabled ? 'primary' : ''}" data-start="${esc(item.instanceId)}" ${startDisabled ? 'disabled' : ''} title="启动 ${esc(item.name)}" aria-label="启动 ${esc(item.name)}">${actionIcons.play}</button>`;
 
   const openTitle = openAllowed ? `打开 ${item.name} 工作区` : '实例运行就绪后可打开工作区';
-  const openBtn = `<button type="button" class="btn g-icon-button primary" data-open="${esc(item.instanceId)}" ${!openAllowed ? 'disabled' : ''} title="${esc(openTitle)}" aria-label="打开 ${esc(item.name)}">${actionIcons.open}</button>`;
+  const openBtn = `<button type="button" data-vf="Button" class="btn g-icon-button ${openAllowed ? 'primary' : ''}" data-open="${esc(item.instanceId)}" ${!openAllowed ? 'disabled' : ''} title="${esc(openTitle)}" aria-label="打开 ${esc(item.name)}">${actionIcons.open}</button>`;
 
   return `<tr class="instance" data-instance-id="${esc(item.instanceId)}">
     <td>
       <div class="cell-name">
         <div class="app-icon">${nodesIcon}</div>
-        <div class="name-stack">
+        <div class="name-stack cell-name-text">
           ${nameCell}
+          <small class="instance-sub num">${esc(subText)}</small>
           ${note ? `<span class="row-note ${noteError ? 'error' : ''}" role="status">${esc(note)}</span>` : ''}
         </div>
       </div>
     </td>
-    <td><span class="badge ${esc(badgeClass(effectiveStatus))}">${esc(statusLabel({ status: effectiveStatus }))}</span></td>
-    <td class="cell-resource">${esc(cpuText)}</td>
-    <td class="cell-resource">${esc(memText)}</td>
-    <td class="cell-resource">${esc(gpuText)}</td>
+    <td><span data-vf="Pill" class="badge ${esc(badgeClass(effectiveStatus))}"><span class="dot"></span>${esc(statusLabel({ status: effectiveStatus }))}</span></td>
+    <td class="cell-resource num"><strong>${esc(cpuText)}</strong>${meterBar(item.resources?.cpu, 'CPU 使用率', isRunning)}</td>
+    <td class="cell-resource num"><strong>${esc(memText)}</strong>${meterBar(item.resources?.memory, '内存使用率', isRunning)}</td>
+    <td class="cell-resource num"><strong>${esc(gpuText)}</strong>${meterBar(item.resources?.gpu, 'GPU 显存使用率', isRunning)}</td>
     <td class="col-actions"><div class="cell-actions">${destroyBtn}${lifecycleBtn}${openBtn}</div></td>
   </tr>`;
 }
@@ -239,7 +261,6 @@ function render() {
 
   $('refresh').disabled = state === 'loading';
   $('create').hidden = !snapshot.creation && !creation.pending;
-  $('create').textContent = '+ 创建实例';
   $('create-submit').disabled =
     picking || creation.busy || (!snapshot.creation && !creation.pending);
   $('workflow-select').disabled =
