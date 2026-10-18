@@ -67,14 +67,19 @@ button:disabled {
   gap: 5px;
   min-height: 32px;
   padding: 5px 12px;
-  border: 1px solid var(--line);
-  background: var(--shell-button, var(--subtle));
+  border: 0.5px solid var(--vf-border-default, var(--line));
+  background: var(--vf-surface-2, var(--shell-button, var(--subtle)));
   border-radius: 7px;
   color: var(--ink);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
+  transition:
+    background 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 100ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .btn.sm {
   min-height: 28px;
@@ -82,9 +87,33 @@ button:disabled {
   font-size: 12px;
   border-radius: 6px;
 }
+.btn.g-icon-button {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.btn.g-icon-button .icon,
+.btn.g-icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+.btn.g-icon-button[aria-busy="true"] svg {
+  animation: vf-spin 1s linear infinite;
+}
+@keyframes vf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .btn:hover:not(:disabled) {
-  border-color: var(--line-strong, var(--line));
-  background: var(--subtle);
+  border-color: var(--vf-border-strong, var(--line-strong, var(--line)));
+  background: var(--vf-surface-3, var(--subtle));
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.98);
 }
 .btn.primary {
   background: var(--paper, var(--ink));
@@ -96,6 +125,10 @@ button:disabled {
 }
 .btn.danger {
   color: var(--danger);
+}
+.btn.danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, var(--subtle));
 }
 
 /* Filterbar & Search */
@@ -182,9 +215,10 @@ button:disabled {
 
 /* Panel & High-Density 6-Column Instance Data Table */
 .panel {
-  border: 1px solid var(--line);
-  background: var(--shell-panel, var(--panel));
-  border-radius: 10px;
+  border: 0.5px solid var(--vf-border-default, var(--line));
+  background: var(--vf-surface-1, var(--shell-panel, var(--panel)));
+  border-radius: 12px;
+  box-shadow: var(--vf-shadow-card, 0 1px 2px rgba(0, 0, 0, 0.04));
   overflow: hidden;
 }
 .table-wrap {
@@ -201,8 +235,8 @@ button:disabled {
   font-size: 12px;
   font-weight: 500;
   color: var(--muted);
-  background: var(--shell-button, var(--subtle));
-  border-bottom: 1px solid var(--line);
+  background: var(--vf-surface-2, var(--shell-button, var(--subtle)));
+  border-bottom: 0.5px solid var(--vf-border-default, var(--line));
   white-space: nowrap;
 }
 .instance-table th.col-actions,
@@ -211,7 +245,7 @@ button:disabled {
 }
 .instance-table td {
   padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 0.5px solid var(--vf-border-subtle, var(--line));
   vertical-align: middle;
   white-space: nowrap;
 }
@@ -219,7 +253,7 @@ button:disabled {
   border-bottom: 0;
 }
 .instance-table tbody tr:hover {
-  background: var(--shell-button, var(--subtle));
+  background: var(--vf-surface-2, var(--shell-button, var(--subtle)));
 }
 
 .cell-name {
@@ -233,9 +267,9 @@ button:disabled {
   height: 30px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line);
+  border: 0.5px solid var(--vf-border-default, var(--line));
   border-radius: 7px;
-  background: var(--subtle);
+  background: var(--vf-surface-2, var(--subtle));
   color: var(--accent);
   flex: none;
 }
@@ -288,13 +322,13 @@ button.instance-name:hover:not(:disabled) {
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  border: 1px solid var(--line);
+  gap: 6px;
+  border: 0.5px solid var(--vf-border-default, var(--line));
   padding: 2px 8px;
   border-radius: 5px;
   font-size: 11px;
   white-space: nowrap;
-  background: var(--shell-button, var(--subtle));
+  background: var(--vf-surface-2, var(--shell-button, var(--subtle)));
   color: var(--muted);
 }
 .badge.running {
@@ -309,10 +343,34 @@ button.instance-name:hover:not(:disabled) {
 }
 .badge::before {
   content: "";
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: currentColor;
+}
+.badge.running::before {
+  animation: vf-breathe 2.4s ease-in-out infinite;
+}
+.badge.starting::before,
+.badge.stopping::before {
+  animation: vf-working-halo 1.4s ease-out infinite;
+}
+@keyframes vf-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes vf-working-halo {
+  0% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.38);
+  }
+  100% {
+    box-shadow: 0 0 0 5px rgba(59, 130, 246, 0);
+  }
 }
 
 /* Table Pagination Footer */

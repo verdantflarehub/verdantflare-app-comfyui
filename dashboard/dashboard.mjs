@@ -27,6 +27,18 @@ const esc = (value) =>
   );
 const nodesIcon =
   '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6v6H4zM14 14h6v6h-6zM14 4h6v6h-6zM7 10v7h7M10 7h4"/></svg>';
+const actionIcons = {
+  destroy:
+    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M5.5 4V2.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V4M4 4l.7 9.2c0 .5.4.8.9.8h4.8c.5 0 .9-.3.9-.8L12 4M6.8 6.8v4.4M9.2 6.8v4.4"/></svg>',
+  stop:
+    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" fill-opacity="0.18"/></svg>',
+  play:
+    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.6l7.5 4.4L5 12.4V3.6z" fill="currentColor" fill-opacity="0.18"/></svg>',
+  spin:
+    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/></svg>',
+  open:
+    '<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3.5H3.8A1.3 1.3 0 0 0 2.5 4.8v7.4a1.3 1.3 0 0 0 1.3 1.3h7.4a1.3 1.3 0 0 0 1.3-1.3V9.5M9.5 2.5h4v4M13.2 2.8L7.5 8.5"/></svg>',
+};
 
 let snapshot = { items: [], state: 'loading', error: '', creation: false },
   statusFilter = 'all',
@@ -150,25 +162,29 @@ function row(item) {
     ? `<button type="button" class="instance-name" data-open="${esc(item.instanceId)}">${esc(item.name)}</button>`
     : `<span class="instance-name">${esc(item.name)}</span>`;
 
-  const destroyBtn = isDestroying
-    ? `<button type="button" class="btn sm danger" data-destroy="${esc(item.instanceId)}" disabled>销毁中…</button>`
+  const destroyTitle = isDestroying
+    ? '销毁中…'
     : canDestroy
-      ? `<button type="button" class="btn sm danger" data-destroy="${esc(item.instanceId)}">销毁</button>`
-      : `<button type="button" class="btn sm danger" disabled title="${isRunning || isStopping || isStarting ? '请先停止实例' : '当前状态不可销毁'}">销毁</button>`;
-  const startBtn = isStarting
-    ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" disabled>启动中…</button>`
-    : canStart || start?.error
-      ? `<button type="button" class="btn sm primary" data-start="${esc(item.instanceId)}" ${!canStart || start?.error === 'START_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>启动</button>`
-      : '';
-  const stopBtn = isStopping
-    ? `<button type="button" class="btn sm" data-stop="${esc(item.instanceId)}" disabled>停止中…</button>`
-    : canStop || stop?.error
-      ? `<button type="button" class="btn sm" data-stop="${esc(item.instanceId)}" ${!canStop || stop?.error === 'STOP_RECOVERY_UNAVAILABLE' ? 'disabled' : ''}>停止</button>`
-      : '';
-  const openBtn =
-    isRunning || isStopping || (!isStarting && !canStart && !start?.error)
-      ? `<button type="button" class="btn sm primary" data-open="${esc(item.instanceId)}" ${!openAllowed ? 'disabled' : ''}>打开 →</button>`
-      : '';
+      ? `销毁 ${item.name}`
+      : isRunning || isStopping || isStarting
+        ? '运行或过渡中的实例不可直接销毁，请先停止实例'
+        : '当前状态不可销毁';
+  const destroyBtn = isDestroying
+    ? `<button type="button" class="btn g-icon-button danger" data-destroy="${esc(item.instanceId)}" disabled aria-busy="true" title="销毁中…" aria-label="销毁中…">${actionIcons.spin}</button>`
+    : `<button type="button" class="btn g-icon-button danger" ${canDestroy ? `data-destroy="${esc(item.instanceId)}"` : 'disabled'} title="${esc(destroyTitle)}" aria-label="${esc(destroyTitle)}">${actionIcons.destroy}</button>`;
+
+  const startDisabled = !canStart || start?.error === 'START_RECOVERY_UNAVAILABLE';
+  const stopDisabled = !canStop || stop?.error === 'STOP_RECOVERY_UNAVAILABLE';
+  const lifecycleBtn = isStarting
+    ? `<button type="button" class="btn g-icon-button" data-start="${esc(item.instanceId)}" disabled aria-busy="true" title="启动中…" aria-label="启动中…">${actionIcons.spin}</button>`
+    : isStopping
+      ? `<button type="button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" disabled aria-busy="true" title="停止中…" aria-label="停止中…">${actionIcons.spin}</button>`
+      : canStop || stop?.error || isRunning
+        ? `<button type="button" class="btn g-icon-button" data-stop="${esc(item.instanceId)}" ${stopDisabled ? 'disabled' : ''} title="停止 ${esc(item.name)}" aria-label="停止 ${esc(item.name)}">${actionIcons.stop}</button>`
+        : `<button type="button" class="btn g-icon-button" data-start="${esc(item.instanceId)}" ${startDisabled ? 'disabled' : ''} title="启动 ${esc(item.name)}" aria-label="启动 ${esc(item.name)}">${actionIcons.play}</button>`;
+
+  const openTitle = openAllowed ? `打开 ${item.name} 工作区` : '实例运行就绪后可打开工作区';
+  const openBtn = `<button type="button" class="btn g-icon-button primary" data-open="${esc(item.instanceId)}" ${!openAllowed ? 'disabled' : ''} title="${esc(openTitle)}" aria-label="打开 ${esc(item.name)}">${actionIcons.open}</button>`;
 
   return `<tr class="instance" data-instance-id="${esc(item.instanceId)}">
     <td>
@@ -184,7 +200,7 @@ function row(item) {
     <td class="cell-resource">${esc(cpuText)}</td>
     <td class="cell-resource">${esc(memText)}</td>
     <td class="cell-resource">${esc(gpuText)}</td>
-    <td class="col-actions"><div class="cell-actions">${destroyBtn}${stopBtn}${startBtn}${openBtn}</div></td>
+    <td class="col-actions"><div class="cell-actions">${destroyBtn}${lifecycleBtn}${openBtn}</div></td>
   </tr>`;
 }
 
