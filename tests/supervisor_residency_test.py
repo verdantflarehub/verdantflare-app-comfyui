@@ -1799,3 +1799,165 @@ asyncio.run(run_reap())
         self.assertEqual(outcome.error_code, 'REAP_TIMEOUT_UNRECLAIMED')
         self.assertEqual(sup_q.residency_state, 'quarantined')
         self.assertEqual(sup_q.unreclaimed_pids, (54322,))
+
+    async def test_residency_sync_reports_s2_settles_warm_grant_and_reacquires_without_reload(self):
+        root = Path(tempfile.mkdtemp(prefix='vf-sync-warm-'))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        engines = []
+
+        async def spawn_fake(epoch, _reserved_port, env):
+            engine = FakeInnerEngine(INSTANCE_ID, WORKER_TOKEN, epoch)
+            engine.spawn_env = env
+            await engine.start()
+            engines.append(engine)
+            return engine, engine.boot_id, engine.port
+
+        async def cleanup_engines():
+            for eng in engines:
+                await eng.stop(0)
+
+        self.addCleanup(cleanup_engines)
+        sup = Supervisor(
+            INSTANCE_ID,
+            WORKER_TOKEN,
+            workspace_root=root / 'ws',
+            comfy_root=root / 'ws',
+            frontend_root=root / 'ws',
+            device_mode='cuda',
+            cuda_visible_devices='GPU-00000000-0000-0000-0000-000000000001',
+            resource_binding={
+                'pod_uid': POD_UID,
+                'namespace': 'station-apps',
+                'pod_name': 'comfyui-worker-0',
+                'container': 'worker',
+            },
+            container_id=CONTAINER_HEX,
+            shm_root=root / 'shm',
+            spawner=spawn_fake,
+        )
+        (root / 'shm').mkdir(parents=True, exist_ok=True)
+        sup_runner = web.AppRunner(build_supervisor_app(sup))
+        await sup_runner.setup()
+        sup_site = web.TCPSite(sup_runner, '127.0.0.1', 0)
+        await sup_site.start()
+        self.addCleanup(sup_runner.cleanup)
+        sup_port = sup_site._server.sockets[0].getsockname()[1]
+        base_url = f'http://127.0.0.1:{sup_port}'
+
+        reports = []
+        acquires = []
+        releases = []
+        seq_counter = {'tok': 100}
+
+        async def sched_handler(request):
+            if request.headers.get('Authorization') != 'Bearer sched-sync-tok':
+                return web.json_response({'error_code': 'UNAUTHENTICATED'}, status=401)
+            body = await request.json()
+            if request.method == 'POST' and request.path == '/internal/v1/gpu-scheduler/residency/report':
+                reports.append(body)
+                return web.json_response({'ok': True}, status=200)
+            if request.method == 'POST' and request.path == '/internal/v1/gpu-scheduler/leases/acquire':
+                acquires.append(body)
+                seq_counter['tok'] += 1
+                tok = seq_counter['tok']
+                lid = f'lease-warm-{tok}'
+                return web.json_response({
+                    'lease_id': lid,
+                    'state': 'leased',
+                    'holder_app_id': 'app-comfyui',
+                    'holder_task_id': body.get('task_id', ''),
+                    'fencing_token': tok,
+                    'gpu_uuid': 'GPU-00000000-0000-0000-0000-000000000001',
+                    'gpu_uuids': ['GPU-00000000-0000-0000-0000-000000000001'],
+                    'pod_uid': POD_UID,
+                    'container_id': CONTAINER_HEX,
+                    'boot_id': sup.boot_id,
+                    'attempt_id': body['attempt_id'],
+                    'peak_budget_mib': 12288,
+                    'startup_free_min_mib': 10240,
+                    'priority': 'shared_slice',
+                    'blocking_reason': '',
+                    'expires_at': '2029-11-15T00:00:00Z',
+                    'version': 1,
+                }, status=200)
+            if request.method == 'POST' and request.path.endswith('/release'):
+                lid = request.path.rsplit('/', 2)[-2]
+                releases.append((lid, body))
+                return web.json_response({'lease_id': lid, 'state': 'released'}, status=200)
+            return web.json_response({'error_code': 'NOT_FOUND'}, status=404)
+
+        sched_app = web.Application()
+        sched_app.router.add_route('*', '/{tail:.*}', sched_handler)
+        sched_runner = web.AppRunner(sched_app)
+        await sched_runner.setup()
+        sched_site = web.TCPSite(sched_runner, '127.0.0.1', 0)
+        await sched_site.start()
+        self.addCleanup(sched_runner.cleanup)
+        sched_port = sched_site._server.sockets[0].getsockname()[1]
+
+        fake_proc = root / 'fake_proc_sync'
+        fake_proc.mkdir(parents=True, exist_ok=True)
+        for pid, comm, ticks in ((40001, 'python3', 888881), (sup.supervisor_pid, 'supervisor', 777771)):
+            pdir = fake_proc / str(pid)
+            pdir.mkdir(parents=True, exist_ok=True)
+            tail = ' '.join(['S', '1', str(pid)] + ['0'] * 16 + [str(ticks), '0', '0'])
+            (pdir / 'stat').write_text(f'{pid} ({comm}) {tail}\n', encoding='utf-8')
+
+        sup.proc_root = fake_proc
+        sup.grant_policy = 'required'
+        sup.listen_port = sup_port
+        sup.scheduler_url = f'http://127.0.0.1:{sched_port}'
+        sup.scheduler_token = 'sched-sync-tok'
+        sup.residency_sync_enabled = True
+
+        def hdrs(epoch=None):
+            h = {'Authorization': 'Bearer ' + WORKER_TOKEN, 'X-VF-Boot-Id': sup.boot_id}
+            if epoch is not None:
+                h['X-VF-Engine-Epoch'] = str(epoch)
+            return h
+
+        async with aiohttp.ClientSession(trust_env=False) as sess:
+            # 1) Initial S3 standby report
+            await sup.residency_sync_step()
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0]['residency_state'], 'zero_vram_standby')
+            self.assertEqual(reports[0]['gpu_uuid'], 'GPU-00000000-0000-0000-0000-000000000001')
+
+            # 2) First prompt acquires lease-warm-101, wakes epoch 1, finishes -> S2 report + warm_idle_settled release!
+            pid1 = str(uuid.uuid4())
+            async with sess.post(
+                base_url + '/prompt',
+                json={'prompt_id': pid1, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
+                headers=hdrs(),
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+            self.assertEqual(len(acquires), 1)
+            self.assertEqual(acquires[0]['candidate_gpu_uuids'], ['GPU-00000000-0000-0000-0000-000000000001'])
+            engines[0].finish_prompt(pid1)
+            await sess.get(base_url + f'/history/{pid1}', headers=hdrs(epoch=1))
+            self.assertEqual(sup.residency_state, 'idle_evictable')
+
+            await sup.residency_sync_step()
+            self.assertEqual(reports[-1]['residency_state'], 'idle_evictable')
+            self.assertEqual(len(releases), 1)
+            self.assertEqual(releases[0][0], 'lease-warm-101')
+            self.assertEqual(releases[0][1]['reclaim_mode'], 'warm_idle_settled')
+            self.assertEqual(
+                releases[0][1]['reclaim_proof']['resident_procs'],
+                [{'pid': 40001, 'starttime_ticks': 888881}],
+            )
+            self.assertIsNone(sup.active_grant)
+            self.assertTrue(sup._warm_grant_settled)
+
+            # 3) Second prompt while warm reacquires lease-warm-102 WITHOUT reloading inner ComfyUI!
+            pid2 = str(uuid.uuid4())
+            async with sess.post(
+                base_url + '/prompt',
+                json={'prompt_id': pid2, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
+                headers=hdrs(epoch=1),
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get('X-VF-Engine-Epoch'), '1')
+            self.assertEqual(sup.reload_count, 1)
+            self.assertEqual(len(acquires), 2)
+            self.assertEqual(sup.active_grant['lease_id'], 'lease-warm-102')

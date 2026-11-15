@@ -32,6 +32,7 @@ PR_SET_CHILD_SUBREAPER = 36
 DEFAULT_WARM_TTL_SECONDS = 180
 DEFAULT_SOFT_EVICT_DEADLINE_MS = 10000
 HEX64_RE = re.compile(r'([0-9a-f]{64})', re.IGNORECASE)
+GPU_UUID_RE = re.compile(r'GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z')
 SAFE_SHM_NAME_RE = re.compile(r'[A-Za-z0-9_.-]{1,192}\Z')
 LOGGER = logging.getLogger(__name__)
 
@@ -239,6 +240,49 @@ def list_adopted_descendants(supervisor_pid, whitelist_identities, *, proc_root=
         discovered.append((pid, info['starttime_ticks']))
         stack.extend(children_by_ppid.get(pid, ()))
     return discovered
+
+
+def _resolve_visible_gpu_uuid(env=None, *, extra=None) -> str:
+    source_env = os.environ if env is None else env
+    candidates = [extra] if isinstance(extra, str) and extra.strip() else []
+    for key in ('COMFYUI_GPU_UUID', 'VF_VISIBLE_GPU_UUIDS', 'NVIDIA_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'):
+        val = source_env.get(key, '')
+        if isinstance(val, str) and val.strip():
+            candidates.append(val)
+    for raw in candidates:
+        for tok in raw.split(','):
+            cand = tok.strip()
+            if GPU_UUID_RE.fullmatch(cand):
+                return cand
+    return ''
+
+
+def _list_container_resident_procs(supervisor_pid, *, proc_root=Path('/proc')) -> list[dict]:
+    root = Path(proc_root)
+    if not root.is_dir():
+        return []
+    sup = int(supervisor_pid)
+    procs = []
+    try:
+        items = sorted(root.iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else 0)
+    except OSError:
+        return []
+    for item in items:
+        if not item.name.isdigit():
+            continue
+        pid = int(item.name)
+        if pid <= 0 or pid == sup:
+            continue
+        parsed = read_proc_stat(pid, proc_root=root)
+        if parsed is None or parsed['state'] == 'Z':
+            continue
+        ticks = int(parsed['starttime_ticks'])
+        if ticks <= 0:
+            continue
+        procs.append({'pid': pid, 'starttime_ticks': ticks})
+        if len(procs) >= 128:
+            break
+    return procs
 
 
 def register_epoch_shm_object(name, *, shm_root=None, manifest_file=None, env=None):
@@ -529,6 +573,14 @@ class Supervisor:
         self.last_reclaim_proof: dict | None = None
         self.pending_grant = None
         self.active_grant = None
+        self.residency_sync_enabled = os.environ.get('VF_GPU_RESIDENCY_SYNC') == '1'
+        self._sync_wakeup = asyncio.Event()
+        self._last_reported_key: tuple[str, int, int] | None = None
+        self._last_heartbeat_mono = 0.0
+        self._last_grant_gpu_uuid = _resolve_visible_gpu_uuid(
+            extra=(resource_binding or {}).get('gpu_uuid') or cuda_visible_devices
+        )
+        self._warm_grant_settled = False
         self._load_fence_state_on_boot()
 
         self.lineage: EpochLineage | None = None
@@ -612,6 +664,7 @@ class Supervisor:
         if self.residency_state != new_state:
             self.residency_state = new_state
             self.residency_seq += 1
+            self._sync_wakeup.set()
 
     def _effective_blocking_reason(self):
         if self.unreclaimed_reason is not None or self.residency_state == 'quarantined':
@@ -1023,14 +1076,243 @@ class Supervisor:
         if self.pending_releases and self.scheduler_url:
             await self.flush_pending_releases()
 
+    def _settle_warm_grant_locked(self, grant: dict) -> bool:
+        if not isinstance(grant, dict):
+            return False
+        lease_id = str(grant.get('lease_id') or '').strip()
+        attempt_id = str(grant.get('attempt_id') or '').strip()
+        token_val = int(grant.get('fencing_token') or 0)
+        if not lease_id or token_val <= 0:
+            return False
+        pod_uid = (self.guard.resource_binding or {}).get('pod_uid', '')
+        eff_epoch = max(1, int(self.gpu_epoch))
+        sup_ticks = int(self._effective_supervisor_ticks())
+        next_min = max(self.min_fencing_token, token_val)
+        next_consumed = max(self.consumed_fencing_token, token_val)
+        next_rev_leases = set(self.revoked_leases) | {lease_id}
+        next_rev_attempts = set(self.revoked_attempts) | ({attempt_id} if attempt_id else set())
+        next_inst_leases = set(self.installed_leases) - {lease_id}
+        next_inst_attempts = set(self.installed_attempts) - ({attempt_id} if attempt_id else set())
+        next_inst_max = 0 if (not next_inst_leases and not next_inst_attempts) else self.installed_max_fencing_token
+        resident_procs = _list_container_resident_procs(self.supervisor_pid, proc_root=self.proc_root)
+        warm_proof = {
+            'proof_source': 'receiver_guard',
+            'token_sealed': True,
+            'reclaimed': True,
+            'active_tasks': 0,
+            'supervisor_pid': int(self.supervisor_pid),
+            'supervisor_starttime_ticks': sup_ticks,
+            'sealed_pod_uid': pod_uid,
+            'sealed_container_id': self.container_id,
+            'sealed_boot_id': self.boot_id,
+            'sealed_gpu_epoch': eff_epoch,
+            'revoked_lease_id': lease_id,
+            'consumed_fencing_token': int(next_consumed),
+            'revoked_fencing_token': int(max(token_val, next_consumed)),
+            'resident_procs': resident_procs,
+        }
+        if attempt_id:
+            warm_proof['revoked_attempt_id'] = attempt_id
+        next_pending = dict(self.pending_releases)
+        next_pending[lease_id] = {
+            'idempotency_key': f'comfyui-warm-settle:{lease_id}:epoch:{eff_epoch}',
+            'fencing_token': int(token_val),
+            'worker_settled': True,
+            'pod_uid': pod_uid,
+            'container_id': self.container_id,
+            'boot_id': self.boot_id,
+            'gpu_epoch': eff_epoch,
+            'supervisor_pid': int(self.supervisor_pid),
+            'supervisor_starttime_ticks': sup_ticks,
+            'reclaim_mode': 'warm_idle_settled',
+            'reclaim_proof': warm_proof,
+        }
+        next_sealed = dict(self.sealed_proofs_by_lease)
+        next_sealed[lease_id] = warm_proof
+        self._persist_fence_state_locked(
+            candidate_overrides={
+                'min_fencing_token': next_min,
+                'consumed_fencing_token': next_consumed,
+                'installed_max_fencing_token': next_inst_max,
+                'revoked_leases': next_rev_leases,
+                'revoked_attempts': next_rev_attempts,
+                'installed_leases': next_inst_leases,
+                'installed_attempts': next_inst_attempts,
+                'pending_releases': next_pending,
+                'sealed_proofs_by_lease': next_sealed,
+                'last_reclaim_proof': warm_proof,
+            }
+        )
+        self.min_fencing_token = next_min
+        self.consumed_fencing_token = next_consumed
+        self.installed_max_fencing_token = next_inst_max
+        self.revoked_leases = next_rev_leases
+        self.revoked_attempts = next_rev_attempts
+        self.installed_leases = next_inst_leases
+        self.installed_attempts = next_inst_attempts
+        self.pending_releases = next_pending
+        self.last_reclaim_proof = warm_proof
+        self.active_grant = None
+        self._warm_grant_settled = True
+        return True
+
+    def _post_scheduler_json_sync(self, path: str, body: dict) -> tuple[int, dict | None]:
+        headers = {'Content-Type': 'application/json'}
+        if self.scheduler_token:
+            headers['Authorization'] = f'Bearer {self.scheduler_token}'
+        no_proxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            f'{self.scheduler_url}{path}',
+            data=json.dumps(body, separators=(',', ':')).encode('utf-8'),
+            headers=headers,
+            method='POST',
+        )
+        try:
+            with no_proxy_opener.open(req, timeout=5) as resp:
+                status_code = getattr(resp, 'status', 200)
+                raw = resp.read(65536)
+                data = json.loads(raw.decode('utf-8')) if raw else None
+                return status_code, data if isinstance(data, dict) else None
+        except urllib.error.HTTPError as exc:
+            return int(exc.code), None
+        except (OSError, ValueError):
+            return 0, None
+
+    async def residency_sync_step(self) -> None:
+        if not self.residency_sync_enabled or not self.scheduler_url:
+            return
+        report_body: dict | None = None
+        report_key: tuple[str, int, int] | None = None
+        hb_target: tuple[str, dict] | None = None
+        binding = self.guard.resource_binding or {}
+        pod_uid = (binding.get('pod_uid') or os.environ.get('COMFYUI_POD_UID') or '').strip()
+        node_uid = (binding.get('node_uid') or os.environ.get('COMFYUI_NODE_UID') or os.environ.get('NODE_UID') or '').strip()
+        container_name = (binding.get('container') or os.environ.get('COMFYUI_CONTAINER_NAME') or 'worker').strip() or 'worker'
+
+        async with self.lock:
+            state_snap = self.gpu_state()
+            state_name = state_snap['residency_state']
+            reason = state_snap['blocking_reason']
+            gpu_uuid = (
+                (self.active_grant or {}).get('gpu_uuid')
+                or self._last_grant_gpu_uuid
+                or _resolve_visible_gpu_uuid(extra=binding.get('gpu_uuid') or self.cuda_visible_devices)
+            )
+            if isinstance(self.active_grant, dict) and self.active_grant.get('node_uid') and not node_uid:
+                node_uid = str(self.active_grant['node_uid']).strip()
+            in_transition = state_name in {'sealing', 'draining_hard'}
+            cur_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
+            if (
+                not in_transition
+                and self.instance_id
+                and pod_uid
+                and gpu_uuid
+                and cur_key != self._last_reported_key
+            ):
+                port = self.listen_port if self.listen_port > 0 else int(os.environ.get('COMFYUI_PORT', '8188'))
+                report_key = cur_key
+                report_body = {
+                    'instance_id': self.instance_id,
+                    'node_uid': node_uid,
+                    'pod_uid': pod_uid,
+                    'container_name': container_name,
+                    'container_id': self.container_id,
+                    'boot_id': self.boot_id,
+                    'gpu_epoch': int(self.gpu_epoch),
+                    'residency_seq': int(self.residency_seq),
+                    'gpu_uuid': gpu_uuid,
+                    'residency_state': state_name,
+                    'human_protected': False,
+                    'gui_connection_alive': False,
+                    'dirty': False,
+                    'snapshot_in_progress': bool(reason in PROTECTED_ARCHIVE_REASONS),
+                    'snapshot_required': False,
+                    'blocking_reason': reason,
+                    'pinned_budget_mib': 0,
+                    'vram_allocated_mib': state_snap['vram_allocated_mib'],
+                    'idle_seconds': int(state_snap['idle_seconds']),
+                    'callback_endpoint': f'http://127.0.0.1:{port}',
+                    'template_upgraded': True,
+                }
+            if (
+                isinstance(self.active_grant, dict)
+                and (state_name in {'waking', 'active_compute'} or bool(self.active_prompts) or bool(self.in_flight_prompts))
+                and (self.clock() - self._last_heartbeat_mono) >= 15.0
+            ):
+                lid = str(self.active_grant.get('lease_id') or '').strip()
+                ftok = int(self.active_grant.get('fencing_token') or 0)
+                if lid and ftok > 0:
+                    hb_target = (
+                        lid,
+                        {
+                            'idempotency_key': f'comfyui-hb:{lid}:{int(self.wall_clock())}',
+                            'fencing_token': ftok,
+                            'pod_uid': pod_uid,
+                            'container_id': self.container_id,
+                            'boot_id': self.boot_id,
+                        },
+                    )
+
+        if report_body is not None and report_key is not None:
+            status_code, _ = await asyncio.to_thread(
+                self._post_scheduler_json_sync,
+                '/internal/v1/gpu-scheduler/residency/report',
+                report_body,
+            )
+            if status_code in (200, 204, 409):
+                async with self.lock:
+                    self._last_reported_key = report_key
+
+        if hb_target is not None:
+            lid, hb_body = hb_target
+            status_code, hb_data = await asyncio.to_thread(
+                self._post_scheduler_json_sync,
+                f'/internal/v1/gpu-scheduler/leases/{lid}/heartbeat',
+                hb_body,
+            )
+            if status_code == 200:
+                async with self.lock:
+                    self._last_heartbeat_mono = self.clock()
+                    if (
+                        isinstance(hb_data, dict)
+                        and hb_data.get('expires_at')
+                        and isinstance(self.active_grant, dict)
+                        and self.active_grant.get('lease_id') == lid
+                    ):
+                        self.active_grant['expires_at'] = hb_data['expires_at']
+
+        need_flush = False
+        async with self.lock:
+            cur_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
+            if (
+                self.residency_state == 'idle_evictable'
+                and self._effective_blocking_reason() == 'none'
+                and not self.active_prompts
+                and not self.in_flight_prompts
+                and isinstance(self.active_grant, dict)
+                and self._last_reported_key == cur_key
+            ):
+                try:
+                    need_flush = self._settle_warm_grant_locked(self.active_grant)
+                except FenceStatePersistenceError:
+                    need_flush = False
+        if need_flush:
+            await self.flush_pending_releases()
+
     async def _warm_ttl_loop(self):
         interval = min(1.0, max(0.05, self.warm_ttl_seconds / 10.0))
         while True:
-            await asyncio.sleep(interval)
+            try:
+                await asyncio.wait_for(self._sync_wakeup.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            self._sync_wakeup.clear()
             try:
                 if self.pending_releases and self.scheduler_url:
                     await self.flush_pending_releases()
                 await self.maybe_expire_warm_cache()
+                if self.residency_sync_enabled:
+                    await self.residency_sync_step()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1173,7 +1455,8 @@ class Supervisor:
             await self.flush_pending_releases()
         attempt_id = str(uuid.uuid4())
         binding = self.guard.resource_binding or {}
-        gpu_uuid = (binding.get('gpu_uuid') or os.environ.get('COMFYUI_GPU_UUID') or '').strip()
+        explicit_gpu_uuid = (binding.get('gpu_uuid') or os.environ.get('COMFYUI_GPU_UUID') or '').strip()
+        cand_gpu_uuid = explicit_gpu_uuid or _resolve_visible_gpu_uuid(extra=self.cuda_visible_devices)
         node_uid = (binding.get('node_uid') or os.environ.get('COMFYUI_NODE_UID') or os.environ.get('NODE_UID') or '').strip()
         idempotency_key = f'comfyui-wake-{self.instance_id}-{attempt_id}'
         req_body = {
@@ -1185,7 +1468,7 @@ class Supervisor:
             'container_id': self.container_id,
             'boot_id': self.boot_id,
             'attempt_id': attempt_id,
-            'candidate_gpu_uuids': [gpu_uuid] if gpu_uuid else [],
+            'candidate_gpu_uuids': [cand_gpu_uuid] if cand_gpu_uuid else [],
             'priority_class': 'shared_slice',
         }
         if node_uid:
@@ -1251,7 +1534,7 @@ class Supervisor:
             return self._extract_launch_grant_from_decision(
                 decision,
                 attempt_id=attempt_id,
-                expected_gpu_uuid=gpu_uuid,
+                expected_gpu_uuid=explicit_gpu_uuid,
             )
 
     def _flush_pending_releases_sync(self, items: list[tuple[str, dict]]) -> list[str]:
@@ -1350,6 +1633,8 @@ class Supervisor:
     async def _ensure_inner_ready(self, grant=None):
         async with self.lifecycle_lock:
             reap_revoked = False
+            warm_reacquire = False
+            pod_uid = (self.guard.resource_binding or {}).get('pod_uid', '')
             async with self.lock:
                 self._check_fence_state_healthy_locked()
                 if self.unreclaimed_reason is not None or self.residency_state == 'quarantined':
@@ -1359,7 +1644,10 @@ class Supervisor:
                     if self.grant_policy == 'required':
                         check_grant = grant if grant is not None else self.active_grant
                         if check_grant is None:
-                            reap_revoked = True
+                            if self._warm_grant_settled and self.scheduler_url:
+                                warm_reacquire = True
+                            else:
+                                reap_revoked = True
                         else:
                             try:
                                 self.active_grant = self._validate_grant_locked(check_grant)
@@ -1367,8 +1655,31 @@ class Supervisor:
                                 reap_revoked = True
                     elif grant is not None:
                         self.active_grant = self._validate_grant_locked(grant)
-                    if not reap_revoked:
+                    if not reap_revoked and not warm_reacquire:
                         return self.lineage
+            if warm_reacquire:
+                fresh_grant = await self._acquire_scheduler_grant(pod_uid)
+                async with self.lock:
+                    self._check_fence_state_healthy_locked()
+                    if self.unreclaimed_reason is not None or self.residency_state == 'quarantined':
+                        raise RuntimeError('UNRECLAIMED_GPU_LINEAGE')
+                    if (self.lineage is not None and self.inner_proc is not None
+                            and self.inner_proc.returncode is None and self.lineage.inner_boot_id):
+                        validated_warm = self._validate_grant_locked(fresh_grant)
+                        self._record_grant_installed_locked(validated_warm)
+                        self.active_grant = validated_warm
+                        self._warm_grant_settled = False
+                        self._last_heartbeat_mono = self.clock()
+                        if validated_warm.get('gpu_uuid'):
+                            self._last_grant_gpu_uuid = str(validated_warm['gpu_uuid'])
+                        self.lineage = replace(
+                            self.lineage,
+                            attempt_id=validated_warm['attempt_id'],
+                            lease_id=validated_warm['lease_id'],
+                            fencing_token=validated_warm['fencing_token'],
+                        )
+                        return self.lineage
+                    grant = fresh_grant
             if reap_revoked:
                 await self._reap_current_epoch(graceful_timeout=0.0, hard=True)
                 async with self.lock:
@@ -1376,7 +1687,6 @@ class Supervisor:
                         self._set_state('zero_vram_standby')
                 raise PermissionError('FENCING_TOKEN_REVOKED')
 
-            pod_uid = (self.guard.resource_binding or {}).get('pod_uid', '')
             async with self.lock:
                 candidate_grant = grant if grant is not None else self.pending_grant
             if candidate_grant is None and self.grant_policy == 'required':
@@ -1441,6 +1751,10 @@ class Supervisor:
                     self.gpu_epoch = next_epoch
                     self.inner_proc = proc
                     self.active_grant = validated
+                    self._warm_grant_settled = False
+                    self._last_heartbeat_mono = self.clock()
+                    if validated and validated.get('gpu_uuid'):
+                        self._last_grant_gpu_uuid = str(validated['gpu_uuid'])
                     self.pending_grant = None
                     self.vram_allocated_mib = None
                     self.lineage = EpochLineage(
@@ -1670,6 +1984,7 @@ class Supervisor:
             self.lineage = None
             self.inner_proc = None
             self.active_grant = None
+            self._warm_grant_settled = False
             self._handshake_token = ''
             self._inner_guard_token = ''
             self.in_flight_prompts.clear()
@@ -1964,6 +2279,8 @@ class Supervisor:
                     self._set_state('draining_hard' if force_hard else 'sealing')
 
             if already_standby_resp is not None:
+                async with self.lock:
+                    self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
                 if self.pending_releases and self.scheduler_url:
                     await self.flush_pending_releases()
                 return web.json_response(already_standby_resp, headers={'Cache-Control': 'no-store'})
@@ -2019,6 +2336,7 @@ class Supervisor:
                         }, status=503, headers={'Cache-Control': 'no-store'})
                 self.last_evict_reason = 'HARD_EVICTED' if outcome.hard_used else 'SOFT_EVICTED'
                 self._set_state('zero_vram_standby')
+                self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
                 proof = self.last_reclaim_proof
                 return web.json_response({
                     'ok': True,
@@ -2202,6 +2520,8 @@ class Supervisor:
                 resp_payload['code'] = err_code
                 resp_payload['reason_code'] = err_code
             if proof is not None:
+                if should_reap and reaped:
+                    self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
                 resp_payload['sealed_gpu_epoch'] = int(proof['sealed_gpu_epoch'])
                 resp_payload['reclaim_proof'] = proof
             return web.json_response(resp_payload, status=status_code, headers={'Cache-Control': 'no-store'})
