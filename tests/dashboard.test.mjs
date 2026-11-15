@@ -287,13 +287,6 @@ test('dependencies and workflow-apis projections scrub /data/models and project 
   const parsed = readWorkflowApis({
     schema_version: 1,
     can_mount_channel: true,
-    headless_pool: {
-      worker_id: 'headless-0',
-      quarantined: true,
-      quarantine_reason: 'SCRUB_FAILED',
-      dirty_task_id: 'task_99',
-      engine_epoch: 4,
-    },
     items: [
       {
         published_api_id: 'pub_001',
@@ -325,8 +318,7 @@ test('dependencies and workflow-apis projections scrub /data/models and project 
     smoke_candidates: [{ smoke_task_id: 'task_01', instance_id: 'inst_01', draft_version: 2, prompt_sha256: 'b'.repeat(64), peak_vram_mib: 12000 }],
   });
   assert.equal(parsed.canMountChannel, true);
-  assert.equal(parsed.headlessPool.quarantined, true);
-  assert.equal(parsed.headlessPool.quarantineReason, 'SCRUB_FAILED');
+  assert.equal(parsed.headlessPool, undefined);
   assert.equal(parsed.items[0].sourceBadge, '本地');
   assert.equal(parsed.items[0].hasSampleImage, true);
   assert.equal(parsed.items[0].catalogModelId, 'comfyui:sdxl-lora-img2img@1.0.0');

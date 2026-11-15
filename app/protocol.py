@@ -2,8 +2,10 @@
 import hmac
 import http.client
 import json
+import os
 import re
 import secrets
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -95,7 +97,25 @@ class JSONClient:
                 or u.query or u.fragment or u.path not in {'', '/'}):
             raise ValueError('invalid internal origin')
         self.origin, self.timeout, self.max_bytes = origin.rstrip('/'), timeout, max_bytes
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+        if u.scheme == 'https':
+            ca_file = (
+                os.environ.get('COMFYUI_PROJECT_CA_FILE')
+                or os.environ.get('COMFYUI_ARTIFACT_CA_FILE')
+                or os.environ.get('SSL_CERT_FILE')
+                or ''
+            ).strip() or None
+            ca_pem = (
+                os.environ.get('COMFYUI_PROJECT_CA_PEM')
+                or os.environ.get('COMFYUI_ARTIFACT_CA_PEM')
+                or ''
+            ).strip() or None
+            if ca_file or ca_pem:
+                ssl_ctx = ssl.create_default_context(cafile=ca_file)
+                if ca_pem:
+                    ssl_ctx.load_verify_locations(cadata=ca_pem)
+                handlers.append(urllib.request.HTTPSHandler(context=ssl_ctx))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def request_with_headers(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False, accepted_statuses=(200,), passthrough_errors=False, max_bytes=None):
         eff_max = self.max_bytes if max_bytes is None else int(max_bytes)
@@ -166,7 +186,10 @@ class ProjectAccess:
         if not all(valid_id(v) for v in (principal.user_id, principal.organization_id, project_id)):
             raise Error('PERMISSION_DENIED', 403)
         rid = request_id()
+        open_write_only = os.environ.get('COMFYUI_PROJECT_OPEN_WRITE_ONLY', '').strip().lower() in {'1', 'true', 'yes'}
         request = {'project_id': project_id}
+        if write and open_write_only:
+            request['require_write'] = True
         if revision_id is not None:
             if not valid_id(revision_id):
                 raise Error('INVALID_ARGUMENT')
@@ -178,7 +201,7 @@ class ProjectAccess:
             raise Error('DEPENDENCY_UNAVAILABLE', 503)
         if revision_id is not None and result['revision_id'] != revision_id:
             raise Error('DEPENDENCY_UNAVAILABLE', 503)
-        if write:
+        if write and not open_write_only:
             decision = self.client.request('POST', '/internal/v1/artifact/authorize', {
                 'principal': {'organization_id': principal.organization_id, 'subject_id': principal.user_id,
                               'request_id': rid},

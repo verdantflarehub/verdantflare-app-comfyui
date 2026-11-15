@@ -504,8 +504,10 @@ class ModelCacheClient:
             params['query'] = query
         if cursor:
             params['cursor'] = cursor
-        path = '/internal/v1/model-cache/models?' + urlencode(params)
-        raw = self.client.request('GET', path, None, self._headers(), passthrough_errors=True)
+        raw = self.client.request(
+            'GET', '/internal/v1/model-cache/models', None,
+            self._headers(), query=params, passthrough_errors=True,
+        )
         models_raw = raw.get('models') if isinstance(raw, dict) else None
         if not isinstance(models_raw, list):
             raise Error('MODEL_CATALOG_UNAVAILABLE', 503)

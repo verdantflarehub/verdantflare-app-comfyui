@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import ctypes
 from copy import deepcopy
 import errno
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import ssl
 import stat
 import struct
@@ -23,7 +25,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from .protocol import Error
+from .protocol import Error, request_id, valid_id
 
 SAFE_TASK_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,79}\Z')
 SAFE_INPUT_FILENAME_RE = re.compile(r'^in_[0-9]{1,3}_[0-9a-f]{12,16}\.(?:png|jpg|webp|mp4|webm)\Z')
@@ -1348,6 +1350,7 @@ class StudioArtifactClient:
         timeout: float = 30.0,
         ca_file: str | None = None,
         ca_pem: str | None = None,
+        db_path: str | None = None,
     ):
         self.base_url = base_url.rstrip('/')
         self.service_token = service_token
@@ -1362,6 +1365,84 @@ class StudioArtifactClient:
             if ca_pem is not None
             else (os.environ.get('COMFYUI_ARTIFACT_CA_PEM') or '').strip() or None
         )
+        self.db_path = str(db_path).strip() if db_path else None
+        self._ref_lock = threading.Lock()
+        self._ref_cache: dict[tuple[str, str], dict[str, str]] = {}
+        if self.db_path:
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
+                conn.execute(
+                    '''CREATE TABLE IF NOT EXISTS artifact_ref_index (
+                         organization_id TEXT NOT NULL,
+                         lookup_id TEXT NOT NULL,
+                         store_id TEXT NOT NULL,
+                         artifact_id TEXT NOT NULL,
+                         version_id TEXT NOT NULL,
+                         project_id TEXT NOT NULL,
+                         PRIMARY KEY (organization_id, lookup_id)
+                       )'''
+                )
+
+    def _remember_ref(
+        self,
+        organization_id: str,
+        lookup_ids: list[str],
+        *,
+        store_id: str,
+        artifact_id: str,
+        version_id: str,
+        project_id: str,
+    ) -> None:
+        if not store_id or not artifact_id or not version_id or not project_id:
+            return
+        entry = {
+            'store_id': store_id,
+            'artifact_id': artifact_id,
+            'version_id': version_id,
+            'project_id': project_id,
+        }
+        clean_keys = [k.strip().lower() for k in lookup_ids if isinstance(k, str) and k.strip()]
+        if not clean_keys:
+            return
+        org = organization_id.strip().lower()
+        with self._ref_lock:
+            for key in clean_keys:
+                self._ref_cache[(org, key)] = dict(entry)
+            if self.db_path:
+                with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
+                    for key in clean_keys:
+                        conn.execute(
+                            '''INSERT OR REPLACE INTO artifact_ref_index
+                               (organization_id, lookup_id, store_id, artifact_id, version_id, project_id)
+                               VALUES (?, ?, ?, ?, ?, ?)''',
+                            (org, key, store_id, artifact_id, version_id, project_id),
+                        )
+
+    def _lookup_ref(self, organization_id: str, lookup_id: str) -> dict[str, str] | None:
+        org = organization_id.strip().lower()
+        key = lookup_id.strip().lower()
+        with self._ref_lock:
+            cached = self._ref_cache.get((org, key))
+            if cached is not None:
+                return dict(cached)
+            if self.db_path and os.path.exists(self.db_path):
+                with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn:
+                    row = conn.execute(
+                        '''SELECT store_id, artifact_id, version_id, project_id
+                             FROM artifact_ref_index
+                            WHERE organization_id = ? AND lookup_id = ?''',
+                        (org, key),
+                    ).fetchone()
+                if row is not None:
+                    found = {
+                        'store_id': row[0],
+                        'artifact_id': row[1],
+                        'version_id': row[2],
+                        'project_id': row[3],
+                    }
+                    self._ref_cache[(org, key)] = dict(found)
+                    return found
+        return None
 
     def _build_opener(self) -> urllib.request.OpenerDirector:
         handlers: list[urllib.request.BaseHandler] = [urllib.request.ProxyHandler({})]
@@ -1372,22 +1453,141 @@ class StudioArtifactClient:
             handlers.append(urllib.request.HTTPSHandler(context=ssl_ctx))
         return urllib.request.build_opener(*handlers)
 
-    def _headers(self, principal, content_type: str = 'application/json') -> dict[str, str]:
-        return {
+    def _headers(self, principal, content_type: str | None = 'application/json') -> dict[str, str]:
+        cand_rid = getattr(principal, 'request_id', '')
+        rid = cand_rid if valid_id(cand_rid) else request_id()
+        hdrs = {
             'Authorization': f'Bearer {self.service_token}',
             'X-User-Id': principal.user_id,
             'X-Organization-Id': principal.organization_id,
-            'X-Request-Id': getattr(principal, 'request_id', '') or str(uuid.uuid4()),
-            'Content-Type': content_type,
+            'X-Request-Id': rid,
         }
+        if content_type is not None:
+            hdrs['Content-Type'] = content_type
+        return hdrs
+
+    def _download_v2_content(
+        self,
+        opener: urllib.request.OpenerDirector,
+        principal,
+        project_id: str,
+        requested_artifact_id: str,
+        *,
+        store_id: str,
+        artifact_id: str,
+        version_id: str,
+    ) -> dict:
+        query = urllib.parse.urlencode({'store_id': store_id, 'artifact_id': artifact_id})
+        url = f'{self.base_url}/v2/artifacts/{version_id}/content?{query}'
+        req = urllib.request.Request(url, method='GET', headers=self._headers(principal, None))
+        with opener.open(req, timeout=self.timeout) as resp:
+            raw = resp.read((256 << 20) + 1)
+            if len(raw) > (256 << 20):
+                raise Error('INVALID_PARAMETERS', 400, details={'reason': 'ARTIFACT_TOO_LARGE'})
+            mime = resp.headers.get('Content-Type', 'application/octet-stream').split(';')[0].strip()
+            return {
+                'artifact_id': requested_artifact_id,
+                'organization_id': principal.organization_id,
+                'project_id': project_id,
+                'mime_type': mime,
+                'size_bytes': len(raw),
+                'sha256': hashlib.sha256(raw).hexdigest(),
+                'data': raw,
+            }
 
     def read_artifact(self, principal, project_id: str, artifact_id: str) -> dict:
         if not isinstance(artifact_id, str) or not ARTIFACT_UUID_RE.fullmatch(artifact_id):
             raise Error('INVALID_PARAMETERS', 400, details={'reason': 'INVALID_ARTIFACT_ID'})
+        opener = self._build_opener()
+
+        indexed = self._lookup_ref(principal.organization_id, artifact_id)
+        if indexed is not None:
+            if indexed['project_id'] != project_id:
+                raise Error('FORBIDDEN', 403, details={'reason': 'CROSS_PROJECT_ARTIFACT_FORBIDDEN'})
+            try:
+                return self._download_v2_content(
+                    opener,
+                    principal,
+                    project_id,
+                    artifact_id,
+                    store_id=indexed['store_id'],
+                    artifact_id=indexed['artifact_id'],
+                    version_id=indexed['version_id'],
+                )
+            except urllib.error.HTTPError as exc:
+                if exc.code == 403:
+                    raise Error('FORBIDDEN', 403, details={'reason': 'CROSS_PROJECT_ARTIFACT_FORBIDDEN'}) from exc
+                if exc.code == 404:
+                    raise Error('ARTIFACT_NOT_FOUND', 404, details={'artifact_id': artifact_id}) from exc
+                raise Error('ARTIFACT_UNAVAILABLE', 502) from exc
+            except urllib.error.URLError as exc:
+                raise Error('ARTIFACT_UNAVAILABLE', 502) from exc
+
+        resolve_body = json.dumps({
+            'kind': 'legacy_import',
+            'project_id': project_id,
+            'original_ref': {
+                'service_id': 'comfyui-input',
+                'artifact_id': artifact_id,
+                'version_id': 'v1',
+            },
+        }).encode('utf-8')
+        resolve_req = urllib.request.Request(
+            f'{self.base_url}/v2/artifacts/legacy/resolve',
+            data=resolve_body,
+            method='POST',
+            headers=self._headers(principal, 'application/json'),
+        )
+        try:
+            with opener.open(resolve_req, timeout=self.timeout) as r_resp:
+                ver = json.loads(r_resp.read(16384).decode('utf-8'))
+            owner_proj = str((ver.get('source') or {}).get('project_id') or '').strip()
+            if owner_proj and owner_proj != project_id:
+                raise Error('FORBIDDEN', 403, details={'reason': 'CROSS_PROJECT_ARTIFACT_FORBIDDEN'})
+            s_id = str(ver.get('store_id') or '').strip()
+            a_id = str(ver.get('artifact_id') or '').strip()
+            v_id = str(ver.get('version_id') or '').strip()
+            if s_id and a_id and v_id:
+                self._remember_ref(
+                    principal.organization_id,
+                    [artifact_id, a_id, v_id],
+                    store_id=s_id,
+                    artifact_id=a_id,
+                    version_id=v_id,
+                    project_id=owner_proj or project_id,
+                )
+                return self._download_v2_content(
+                    opener,
+                    principal,
+                    project_id,
+                    artifact_id,
+                    store_id=s_id,
+                    artifact_id=a_id,
+                    version_id=v_id,
+                )
+        except Error:
+            raise
+        except urllib.error.HTTPError as exc:
+            err_payload = {}
+            try:
+                raw_e = exc.read(4096)
+                if raw_e:
+                    err_payload = json.loads(raw_e.decode('utf-8'))
+            except Exception:
+                err_payload = {}
+            exc.close()
+            if exc.code == 403:
+                raise Error('FORBIDDEN', 403, details={'reason': 'CROSS_PROJECT_ARTIFACT_FORBIDDEN'}) from exc
+            if exc.code == 404 and isinstance(err_payload, dict) and err_payload.get('code') == 'NOT_FOUND' and 'request_id' in err_payload:
+                raise Error('ARTIFACT_NOT_FOUND', 404, details={'artifact_id': artifact_id}) from exc
+            if exc.code not in (404, 405):
+                raise Error('ARTIFACT_UNAVAILABLE', 502) from exc
+        except urllib.error.URLError as exc:
+            raise Error('ARTIFACT_UNAVAILABLE', 502) from exc
+
         query = urllib.parse.urlencode({'project_id': project_id, 'artifact_id': artifact_id})
         url = f'{self.base_url}/v2/artifacts/{artifact_id}/content?{query}'
         req = urllib.request.Request(url, method='GET', headers=self._headers(principal))
-        opener = self._build_opener()
         try:
             with opener.open(req, timeout=self.timeout) as resp:
                 raw = resp.read((256 << 20) + 1)
@@ -1428,14 +1628,25 @@ class StudioArtifactClient:
         raw = bytes(data)
         digest = hashlib.sha256(raw).hexdigest()
         opener = self._build_opener()
-        prep_body = json.dumps({
+        clean_mime = mime_type.split(';')[0].strip() or 'application/octet-stream'
+        source_obj: dict[str, str] = {
+            'kind': 'task_output',
             'project_id': project_id,
-            'filename': filename,
-            'mime_type': mime_type,
-            'size_bytes': len(raw),
+            'service_id': 'comfyui',
+            'run_id': f'{task_id}:{node_id}:{filename}'[:120],
+        }
+        try:
+            parsed_tid = uuid.UUID(str(task_id))
+            if str(parsed_tid) == str(task_id):
+                source_obj['task_id'] = str(task_id)
+        except Exception:
+            pass
+        prep_body = json.dumps({
+            'write_id': request_id(),
+            'source': source_obj,
             'sha256': digest,
-            'source': 'comfyui_generated',
-            'source_task_id': task_id,
+            'size': len(raw),
+            'mime': clean_mime,
         }).encode('utf-8')
         prep_req = urllib.request.Request(
             f'{self.base_url}/v2/artifacts/uploads',
@@ -1443,36 +1654,48 @@ class StudioArtifactClient:
             method='POST',
             headers=self._headers(principal, 'application/json'),
         )
+        store_id = ''
         try:
             with opener.open(prep_req, timeout=self.timeout) as resp:
                 prep = json.loads(resp.read(16384).decode('utf-8'))
             upload_id = prep['upload_id']
-            artifact_id = prep['artifact_id']
+            artifact_id = prep.get('artifact_id', '')
             version_id = prep.get('version_id', '')
+            is_v2_native = bool(prep.get('content_path'))
 
-            put_req = urllib.request.Request(
-                f'{self.base_url}/v2/artifacts/uploads/{upload_id}/content',
-                data=raw,
-                method='PUT',
-                headers={
-                    **self._headers(principal, 'application/octet-stream'),
-                    'Content-Length': str(len(raw)),
-                },
-            )
-            with opener.open(put_req, timeout=self.timeout) as resp:
-                resp.read(16384)
+            if str(prep.get('state') or 'prepared') == 'prepared':
+                put_req = urllib.request.Request(
+                    f'{self.base_url}/v2/artifacts/uploads/{upload_id}/content',
+                    data=raw,
+                    method='PUT',
+                    headers={
+                        **self._headers(principal, clean_mime if is_v2_native else 'application/octet-stream'),
+                        'Content-Length': str(len(raw)),
+                    },
+                )
+                with opener.open(put_req, timeout=self.timeout) as resp:
+                    resp.read(16384)
 
-            commit_body = json.dumps({'sha256': digest, 'size_bytes': len(raw)}).encode('utf-8')
-            commit_req = urllib.request.Request(
-                f'{self.base_url}/v2/artifacts/uploads/{upload_id}/commit',
-                data=commit_body,
-                method='POST',
-                headers=self._headers(principal, 'application/json'),
-            )
+            if is_v2_native:
+                commit_req = urllib.request.Request(
+                    f'{self.base_url}/v2/artifacts/uploads/{upload_id}/commit',
+                    data=b'',
+                    method='POST',
+                    headers=self._headers(principal, None),
+                )
+            else:
+                commit_body = json.dumps({'sha256': digest, 'size_bytes': len(raw)}).encode('utf-8')
+                commit_req = urllib.request.Request(
+                    f'{self.base_url}/v2/artifacts/uploads/{upload_id}/commit',
+                    data=commit_body,
+                    method='POST',
+                    headers=self._headers(principal, 'application/json'),
+                )
             with opener.open(commit_req, timeout=self.timeout) as resp:
                 committed = json.loads(resp.read(16384).decode('utf-8') or '{}')
-                artifact_id = committed.get('artifact_id', artifact_id)
-                version_id = committed.get('version_id', version_id)
+                store_id = str(committed.get('store_id') or prep.get('store_id') or '')
+                artifact_id = str(committed.get('artifact_id') or artifact_id)
+                version_id = str(committed.get('version_id') or version_id)
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
                 raise Error('FORBIDDEN', 403) from exc
@@ -1480,7 +1703,17 @@ class StudioArtifactClient:
         except (urllib.error.URLError, KeyError, ValueError) as exc:
             raise Error('ARTIFACT_UPLOAD_FAILED', 502) from exc
 
-        return {
+        if store_id and artifact_id and version_id:
+            self._remember_ref(
+                principal.organization_id,
+                [artifact_id, version_id],
+                store_id=store_id,
+                artifact_id=artifact_id,
+                version_id=version_id,
+                project_id=project_id,
+            )
+
+        out = {
             'artifact_id': artifact_id,
             'version_id': version_id,
             'node_id': node_id,
@@ -1489,6 +1722,9 @@ class StudioArtifactClient:
             'size_bytes': len(raw),
             'sha256': digest,
         }
+        if store_id:
+            out['store_id'] = store_id
+        return out
 
 
 class HeadlessCancelled(Exception):
@@ -2074,7 +2310,11 @@ class HeadlessPoolRunner:
         """
         if not is_admin:
             raise Error('FORBIDDEN', 403)
-        if store is None or not hasattr(store, 'clear_headless_pool_quarantine'):
+        if (
+            store is None
+            or not hasattr(store, 'begin_headless_pool_quarantine_recovery')
+            or not hasattr(store, 'clear_headless_pool_quarantine')
+        ):
             raise Error('HEADLESS_POOL_UNAVAILABLE', 503)
         target_worker = self.worker_id if worker_id is None else worker_id
         if not isinstance(target_worker, str) or target_worker != self.worker_id:
@@ -2083,101 +2323,121 @@ class HeadlessPoolRunner:
             raise Error('HEADLESS_POOL_UNAVAILABLE', 503)
 
         with self._serial_lock:
-            pool_info = store.inspect_headless_worker_pool(self.worker_id)
-            if pool_info.get('active_task_id') or pool_info.get('active_attempt_id'):
-                raise Error('HEADLESS_WORKER_ACTIVE', 409)
-
-            next_epoch = max(self.engine_epoch + 1, int(pool_info.get('engine_epoch') or 1) + 1)
-            prompt_ids_to_check: list[str] = []
-            for p_cand in (pool_info.get('dirty_prompt_id'), self.dirty_prompt_id):
-                if isinstance(p_cand, str) and p_cand and p_cand not in prompt_ids_to_check:
-                    prompt_ids_to_check.append(p_cand)
-            for rec in pool_info.get('reconciling_tasks') or []:
-                rp = rec.get('prompt_id')
-                if isinstance(rp, str) and rp and rp not in prompt_ids_to_check:
-                    prompt_ids_to_check.append(rp)
-
-            if self.worker_client is not None:
-                if not hasattr(self.worker_client, 'evict_vram'):
-                    raise Error('ENGINE_STOP_UNPROVEN', 503)
-                try:
-                    ev_reply = self.worker_client.evict_vram(self.worker_id, {'force_hard': True})
-                except Error as exc:
-                    raise Error('ENGINE_STOP_UNPROVEN', 503, details={'worker_error': exc.code}) from exc
-                except BaseException as exc:
-                    raise Error('ENGINE_STOP_UNPROVEN', 503) from exc
-                if (
-                    not isinstance(ev_reply, dict)
-                    or ev_reply.get('residency_state') != 'zero_vram_standby'
-                    or ev_reply.get('vram_allocated_mib') != 0
-                    or type(ev_reply.get('gpu_epoch')) is not int
-                ):
-                    raise Error('ENGINE_STOP_UNPROVEN', 503)
-                next_epoch = max(next_epoch, int(ev_reply['gpu_epoch']))
-                if hasattr(self.worker_client, 'position'):
-                    for pid in prompt_ids_to_check:
-                        try:
-                            pos = self.worker_client.position(pid)
-                        except BaseException as exc:
-                            raise Error('ENGINE_STOP_UNPROVEN', 503) from exc
-                        if pos is not None:
-                            raise Error('ENGINE_STOP_UNPROVEN', 503, details={'active_prompt_id': pid})
-            elif not (callable(self.default_engine_callback) and self.workspace_root is not None):
-                raise Error('HEADLESS_POOL_UNAVAILABLE', 503)
-
-            tasks_to_scrub: dict[str, str | None] = {}
-            for tid, pid in (
-                (pool_info.get('dirty_task_id'), pool_info.get('dirty_prompt_id')),
-                (self.dirty_task_id, self.dirty_prompt_id),
-                (self.last_task_id, None),
-            ):
-                if isinstance(tid, str) and SAFE_TASK_ID_RE.fullmatch(tid):
-                    tasks_to_scrub.setdefault(tid, pid if isinstance(pid, str) and pid else None)
-            for rec in pool_info.get('reconciling_tasks') or []:
-                rt = rec.get('task_id')
-                rp = rec.get('prompt_id')
-                if isinstance(rt, str) and SAFE_TASK_ID_RE.fullmatch(rt):
-                    tasks_to_scrub.setdefault(rt, rp if isinstance(rp, str) and rp else None)
-            if self.workspace_root is not None:
-                for rel_parent in (
-                    self.workspace_root / 'inputs',
-                    self.workspace_root / 'outputs' / 'vf',
-                    self.workspace_root / 'temp',
-                ):
-                    if rel_parent.exists() and rel_parent.is_dir():
-                        for entry in os.listdir(rel_parent):
-                            if SAFE_TASK_ID_RE.fullmatch(entry):
-                                tasks_to_scrub.setdefault(entry, None)
-
+            pool_info = store.begin_headless_pool_quarantine_recovery(
+                self.worker_id,
+                is_admin=True,
+            )
+            claim_token = pool_info['claim_token']
+            current_db_epoch = int(pool_info.get('engine_epoch') or 1)
             try:
-                for tid, pid in tasks_to_scrub.items():
-                    self._scrub_task(tid, prompt_id=pid)
+                prompt_ids_to_check: list[str] = []
+                for p_cand in (pool_info.get('dirty_prompt_id'), self.dirty_prompt_id):
+                    if isinstance(p_cand, str) and p_cand and p_cand not in prompt_ids_to_check:
+                        prompt_ids_to_check.append(p_cand)
+                for rec in pool_info.get('reconciling_tasks') or []:
+                    rp = rec.get('prompt_id')
+                    if isinstance(rp, str) and rp and rp not in prompt_ids_to_check:
+                        prompt_ids_to_check.append(rp)
+
+                if self.worker_client is not None:
+                    if not hasattr(self.worker_client, 'evict_vram'):
+                        raise Error('ENGINE_STOP_UNPROVEN', 503)
+                    try:
+                        ev_reply = self.worker_client.evict_vram(self.worker_id, {'force_hard': True})
+                    except Error as exc:
+                        raise Error('ENGINE_STOP_UNPROVEN', 503, details={'worker_error': exc.code}) from exc
+                    except BaseException as exc:
+                        raise Error('ENGINE_STOP_UNPROVEN', 503) from exc
+                    if (
+                        not isinstance(ev_reply, dict)
+                        or ev_reply.get('residency_state') != 'zero_vram_standby'
+                        or type(ev_reply.get('vram_allocated_mib')) is not int
+                        or ev_reply.get('vram_allocated_mib') != 0
+                        or type(ev_reply.get('gpu_epoch')) is not int
+                    ):
+                        raise Error('ENGINE_STOP_UNPROVEN', 503)
+                    verified_epoch = ev_reply['gpu_epoch']
+                    if verified_epoch < 1 or verified_epoch < current_db_epoch:
+                        raise Error('ENGINE_STOP_UNPROVEN', 503)
+                    if hasattr(self.worker_client, 'position'):
+                        for pid in prompt_ids_to_check:
+                            try:
+                                pos = self.worker_client.position(pid)
+                            except BaseException as exc:
+                                raise Error('ENGINE_STOP_UNPROVEN', 503) from exc
+                            if pos is not None:
+                                raise Error('ENGINE_STOP_UNPROVEN', 503, details={'active_prompt_id': pid})
+                elif callable(self.default_engine_callback) and self.workspace_root is not None:
+                    verified_epoch = max(current_db_epoch, int(self.engine_epoch or 1), 1)
+                else:
+                    raise Error('HEADLESS_POOL_UNAVAILABLE', 503)
+
+                tasks_to_scrub: dict[str, str | None] = {}
+                for tid, pid in (
+                    (pool_info.get('dirty_task_id'), pool_info.get('dirty_prompt_id')),
+                    (self.dirty_task_id, self.dirty_prompt_id),
+                    (self.last_task_id, None),
+                ):
+                    if isinstance(tid, str) and SAFE_TASK_ID_RE.fullmatch(tid):
+                        tasks_to_scrub.setdefault(tid, pid if isinstance(pid, str) and pid else None)
+                for rec in pool_info.get('reconciling_tasks') or []:
+                    rt = rec.get('task_id')
+                    rp = rec.get('prompt_id')
+                    if isinstance(rt, str) and SAFE_TASK_ID_RE.fullmatch(rt):
+                        tasks_to_scrub.setdefault(rt, rp if isinstance(rp, str) and rp else None)
                 if self.workspace_root is not None:
                     for rel_parent in (
                         self.workspace_root / 'inputs',
                         self.workspace_root / 'outputs' / 'vf',
                         self.workspace_root / 'temp',
                     ):
-                        if rel_parent.exists() and any(rel_parent.iterdir()):
-                            raise Error('SCRUB_FAILED', 503)
-            except Error as exc:
-                if exc.code == 'SCRUB_FAILED':
-                    raise
-                raise Error('SCRUB_FAILED', 503, details={'scrub_error': exc.code}) from exc
-            except BaseException as exc:
-                raise Error('SCRUB_FAILED', 503) from exc
+                        if rel_parent.exists() and rel_parent.is_dir():
+                            for entry in os.listdir(rel_parent):
+                                if SAFE_TASK_ID_RE.fullmatch(entry):
+                                    tasks_to_scrub.setdefault(entry, None)
 
-            stop_proof = {
-                'residency_state': 'zero_vram_standby',
-                'vram_allocated_mib': 0,
-                'gpu_epoch': next_epoch,
-                'scrubbed': True,
-            }
-            cleared = store.clear_headless_pool_quarantine(
-                self.worker_id,
-                stop_proof=stop_proof,
-                is_admin=True,
-            )
+                try:
+                    for tid, pid in tasks_to_scrub.items():
+                        self._scrub_task(tid, prompt_id=pid)
+                    if self.workspace_root is not None:
+                        for rel_parent in (
+                            self.workspace_root / 'inputs',
+                            self.workspace_root / 'outputs' / 'vf',
+                            self.workspace_root / 'temp',
+                        ):
+                            if rel_parent.exists() and any(rel_parent.iterdir()):
+                                raise Error('SCRUB_FAILED', 503)
+                except Error as exc:
+                    if exc.code == 'SCRUB_FAILED':
+                        raise
+                    raise Error('SCRUB_FAILED', 503, details={'scrub_error': exc.code}) from exc
+                except BaseException as exc:
+                    raise Error('SCRUB_FAILED', 503) from exc
+
+                stop_proof = {
+                    'residency_state': 'zero_vram_standby',
+                    'vram_allocated_mib': 0,
+                    'gpu_epoch': verified_epoch,
+                    'scrubbed': True,
+                }
+                cleared = store.clear_headless_pool_quarantine(
+                    self.worker_id,
+                    claim_token=claim_token,
+                    stop_proof=stop_proof,
+                    is_admin=True,
+                )
+            except BaseException as exc:
+                abort_reason = exc.code if isinstance(exc, Error) else (str(exc) if isinstance(exc, TaskError) else 'QUARANTINE_RECOVERY_FAILED')
+                if hasattr(store, 'abort_headless_pool_quarantine_recovery'):
+                    try:
+                        store.abort_headless_pool_quarantine_recovery(
+                            self.worker_id,
+                            claim_token=claim_token,
+                            reason=abort_reason,
+                        )
+                    except BaseException:
+                        pass
+                raise
             self.quarantined = False
             self.quarantine_reason = None
             self.dirty_task_id = None

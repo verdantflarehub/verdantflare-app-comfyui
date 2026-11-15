@@ -83,8 +83,7 @@ let workflow = null,
   pickGeneration = 0;
 let extractedDraftSpec = null,
   extractBusy = false,
-  publishBusy = false,
-  clearingQuarantineBusy = false;
+  publishBusy = false;
 let activePreviewGalleryIds = [],
   previewRequestEpoch = 0,
   previewGalleryOpen = false,
@@ -563,15 +562,8 @@ function render() {
       $('api-search').value,
       apiFilter,
     );
-    const quarantineBanner =
-      apisSnapshot.canMountChannel && apisSnapshot.headlessPool?.quarantined
-        ? `<div class="status-banner" data-error="true" role="alert" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;">
-            <span>无头生产池 <code>${esc(apisSnapshot.headlessPool.workerId)}</code> 已进入隔离保护（原因：<code>${esc(apisSnapshot.headlessPool.quarantineReason || 'SCRUB_FAILED')}</code>）。执行零残留清理并核验零显存待命后可解除隔离。</span>
-            <button type="button" data-vf="Button" class="btn sm danger" data-clear-quarantine="true" ${clearingQuarantineBusy ? 'disabled' : ''}>${clearingQuarantineBusy ? '核验清理中…' : '核验并解除隔离'}</button>
-          </div>`
-        : '';
     if (visibleApis.length > 0) {
-      $('workflow-apis').innerHTML = `${quarantineBanner}<div class="panel table-wrap">
+      $('workflow-apis').innerHTML = `<div class="panel table-wrap">
         <table class="instance-table" aria-label="已发布生产 API 列表">
           <thead>
             <tr>
@@ -589,13 +581,13 @@ function render() {
         </table>
       </div>`;
     } else if (apisSnapshot.state !== 'loading') {
-      $('workflow-apis').innerHTML = `${quarantineBanner}<section class="panel empty">
+      $('workflow-apis').innerHTML = `<section class="panel empty">
         <div class="app-icon">${nodesIcon}</div>
         <h2>${apiItems.length ? '没有匹配筛选条件的生产 API' : '暂无已发布生产工作流 API'}</h2>
         <p>${apiItems.length ? '请尝试其他搜索词或切换筛选标签。' : '在交互画布完成一次冒烟推理后，点击右上角「发布工作流 API」即可固化不可变生产版本。'}</p>
       </section>`;
     } else {
-      $('workflow-apis').innerHTML = quarantineBanner;
+      $('workflow-apis').innerHTML = '';
     }
   }
   updateSize();
@@ -1416,40 +1408,6 @@ if (!sdk || !bridge || !/^1\./.test(sdk.version)) {
         const releaser = gpuReleasers.get(button.dataset.releaseGpu);
         if (item && releaser && snapshot.state === 'ready' && canReleaseGpu(item)) {
           await releaser.submit(item.gpuState?.residencySeq ?? null);
-        }
-        return;
-      }
-      if (button.dataset.clearQuarantine) {
-        if (clearingQuarantineBusy) return;
-        clearingQuarantineBusy = true;
-        render();
-        try {
-          const res = await sdk.app.request({
-            method: 'POST',
-            path: '/headless-pool/clear-quarantine',
-            body: { idempotency_key: newCreateKey() },
-          });
-          if (!disposed) {
-            if (res.status === 200) {
-              $('message').hidden = false;
-              delete $('message').dataset.error;
-              $('message').textContent = '无头生产池已完成零显存核验与工作目录清理，隔离已解除。';
-              await apisController.refresh();
-            } else {
-              $('message').hidden = false;
-              $('message').dataset.error = 'true';
-              $('message').textContent = `解除无头池隔离失败（${res.data?.code || res.status}），请确认 Worker 已恢复可回收状态。`;
-            }
-          }
-        } catch {
-          if (!disposed) {
-            $('message').hidden = false;
-            $('message').dataset.error = 'true';
-            $('message').textContent = '解除无头池隔离请求失败，请稍后重试。';
-          }
-        } finally {
-          clearingQuarantineBusy = false;
-          if (!disposed) render();
         }
         return;
       }

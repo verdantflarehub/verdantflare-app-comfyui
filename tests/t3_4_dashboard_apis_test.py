@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GOLDEN_CANVAS_PATH = REPO_ROOT / 'docs/design/app/comfyui/fixtures/golden_sdxl_lora_canvas.v1.json'
 
 APP_TOKEN = 't' * 32
+OPS_TOKEN = 'r' * 32
 ORG = '11111111-1111-7111-8111-111111111111'
 ADMIN_ID = '22222222-2222-7222-8222-222222222222'
 CREATOR_ID = '33333333-3333-7333-8333-333333333333'
@@ -129,6 +130,7 @@ class T34DashboardApisTest(unittest.TestCase):
             self.app,
             APP_TOKEN,
             manager=self.management,
+            residency_token=OPS_TOKEN,
         )
         self.port = self.server.server_address[1]
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -175,6 +177,23 @@ class T34DashboardApisTest(unittest.TestCase):
             'X-User-Id': who.user_id,
             'X-Organization-Admin': 'true' if who.is_admin else 'false',
         }
+        if raw is not None:
+            headers['Content-Type'] = 'application/json'
+        req = urllib.request.Request(
+            f'http://127.0.0.1:{self.port}{path}',
+            data=raw,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read().decode('utf-8'))
+
+    def _ops_http(self, method: str, path: str, body: dict | None = None, *, token: str = OPS_TOKEN) -> tuple[int, dict]:
+        raw = json.dumps(body).encode('utf-8') if body is not None else None
+        headers = {'Authorization': f'Bearer {token}'}
         if raw is not None:
             headers['Content-Type'] = 'application/json'
         req = urllib.request.Request(
@@ -335,6 +354,21 @@ class T34DashboardApisTest(unittest.TestCase):
             self.assertEqual(len(dep_payload['items']), 3)
             self.assertTrue(all(it['model_id'].startswith('MDL-') for it in dep_payload['items']))
             self.assertNotIn('/data/models', json.dumps(dep_payload))
+
+            # 2a. Slug shorter than 4 chars or starting with digit rejected with 400 (contract regex ^[a-z][a-z0-9-]{2,62}[a-z0-9]$)
+            for bad_slug in ('ab1', '1sdxl'):
+                bad_slug_code, _ = self._http(
+                    'POST',
+                    '/internal/dashboard/workflow-apis/extract',
+                    {
+                        'instance_id': self.instance_id,
+                        'endpoint_slug': bad_slug,
+                        'version': '1.0.0',
+                        'display_name': '非法 Slug',
+                        'output_modality': 'image',
+                    },
+                )
+                self.assertEqual(bad_slug_code, 400)
 
             # 2. Extract WorkflowAPISpec v1 from golden draft
             ext_code, ext_payload = self._http(
@@ -593,7 +627,7 @@ class T34DashboardApisTest(unittest.TestCase):
             db.execute(
                 '''UPDATE headless_worker_pool
                    SET quarantined=1, quarantine_reason='ENGINE_STOP_UNPROVEN',
-                       dirty_task_id=?, dirty_prompt_id=?
+                       engine_epoch=10, dirty_task_id=?, dirty_prompt_id=?
                    WHERE worker_id='headless-0' ''',
                 (tid, view['prompt_id']),
             )
@@ -621,29 +655,50 @@ class T34DashboardApisTest(unittest.TestCase):
 
         self.assertEqual(self.model_cache.get_model_status(sdxl_entry['model_id'])['active_pins'], 1)
 
-        # 1. Non-admin rejected with 403 FORBIDDEN
-        c_forbid, p_forbid = self._http(
+        # 1. Customer Studio routes cannot touch global headless-pool quarantine:
+        #    - /internal/dashboard/headless-pool/clear-quarantine returns 404 NOT_FOUND even for org admin
+        #    - /internal/v1/headless-pool/clear-quarantine rejects Studio caller headers with 403 FORBIDDEN
+        #    - /internal/v1/headless-pool/clear-quarantine rejects Studio APP_TOKEN with 401 UNAUTHENTICATED
+        c_dash_404, p_dash_404 = self._http(
             'POST',
             '/internal/dashboard/headless-pool/clear-quarantine',
             {'idempotency_key': request_id()},
-            actor=self.creator,
+            actor=self.admin,
         )
-        self.assertEqual(c_forbid, 403)
-        self.assertEqual(p_forbid['code'], 'FORBIDDEN')
+        self.assertEqual(c_dash_404, 404)
+        self.assertEqual(p_dash_404['code'], 'NOT_FOUND')
+
+        c_studio_hdr, p_studio_hdr = self._http(
+            'POST',
+            '/internal/v1/headless-pool/clear-quarantine',
+            {'idempotency_key': request_id()},
+            actor=self.admin,
+        )
+        self.assertEqual(c_studio_hdr, 403)
+        self.assertEqual(p_studio_hdr['code'], 'FORBIDDEN')
+
+        c_app_tok, p_app_tok = self._ops_http(
+            'POST',
+            '/internal/v1/headless-pool/clear-quarantine',
+            {'idempotency_key': request_id()},
+            token=APP_TOKEN,
+        )
+        self.assertEqual(c_app_tok, 401)
+        self.assertEqual(p_app_tok['code'], 'UNAUTHENTICATED')
 
         # 2. Client-supplied forged stop_proof rejected with 400 INVALID_BODY
-        c_bad, p_bad = self._http(
+        c_bad, p_bad = self._ops_http(
             'POST',
-            '/internal/dashboard/headless-pool/clear-quarantine',
+            '/internal/v1/headless-pool/clear-quarantine',
             {'idempotency_key': request_id(), 'stop_proof': {'scrubbed': True}},
         )
         self.assertEqual(c_bad, 400)
         self.assertEqual(p_bad['code'], 'INVALID_BODY')
 
         # 3. Worker VRAM still non-zero -> 503 ENGINE_STOP_UNPROVEN, quarantine & pin remain!
-        c_unproven, p_unproven = self._http(
+        c_unproven, p_unproven = self._ops_http(
             'POST',
-            '/internal/dashboard/headless-pool/clear-quarantine',
+            '/internal/v1/headless-pool/clear-quarantine',
             {'idempotency_key': request_id()},
         )
         self.assertEqual(c_unproven, 503)
@@ -651,29 +706,65 @@ class T34DashboardApisTest(unittest.TestCase):
         self.assertTrue(self.headless_runner.quarantined)
         self.assertEqual(self.model_cache.get_model_status(sdxl_entry['model_id'])['active_pins'], 1)
 
-        # 4. Worker VRAM zeroed, but remote scrub fails -> 503 SCRUB_FAILED, quarantine remains!
+        # 4. Worker VRAM zeroed, but negative or stale gpu_epoch (< engine_epoch=10) -> 503 ENGINE_STOP_UNPROVEN (R2-M01)!
         worker_state['residency'] = 'zero_vram_standby'
         worker_state['vram'] = 0
-        worker_state['gpu_epoch'] = 7
-        c_scrub, p_scrub = self._http(
+        for bad_epoch in (-1, 0, 7):
+            worker_state['gpu_epoch'] = bad_epoch
+            c_epoch, p_epoch = self._ops_http(
+                'POST',
+                '/internal/v1/headless-pool/clear-quarantine',
+                {'idempotency_key': request_id()},
+            )
+            self.assertEqual(c_epoch, 503)
+            self.assertEqual(p_epoch['code'], 'ENGINE_STOP_UNPROVEN')
+            self.assertTrue(self.headless_runner.quarantined)
+
+        # 4b. Worker VRAM zeroed & monotonic gpu_epoch >= 10, but remote scrub fails -> 503 SCRUB_FAILED, quarantine remains!
+        worker_state['gpu_epoch'] = 12
+        c_scrub, p_scrub = self._ops_http(
             'POST',
-            '/internal/dashboard/headless-pool/clear-quarantine',
+            '/internal/v1/headless-pool/clear-quarantine',
             {'idempotency_key': request_id()},
         )
         self.assertEqual(c_scrub, 503)
         self.assertEqual(p_scrub['code'], 'SCRUB_FAILED')
         self.assertTrue(self.headless_runner.quarantined)
 
-        # 5. Server-verified zero-VRAM + clean workspace scrub -> 200, reconciling task failed, pin released!
+        # 4c. Cross-process DB recovery fence blocks concurrent clear-quarantine (409 OPERATION_IN_PROGRESS)
+        # while peer OS process is alive, then cleanly recovers once stale/aborted (R2-H03)!
+        peer_store = TaskStore(str(self.base / 't3_4.sqlite'))
+        peer_pid = os.getppid()
+        self.assertNotEqual(peer_pid, os.getpid())
+        peer_store.process_id = f'{peer_pid}:{uuid.uuid4().hex}'
+        held = peer_store.begin_headless_pool_quarantine_recovery('headless-0', is_admin=True)
+        try:
+            c_busy, p_busy = self._ops_http(
+                'POST',
+                '/internal/v1/headless-pool/clear-quarantine',
+                {'idempotency_key': request_id()},
+            )
+            self.assertEqual(c_busy, 409, p_busy)
+            self.assertEqual(p_busy['code'], 'OPERATION_IN_PROGRESS')
+        finally:
+            peer_store.abort_headless_pool_quarantine_recovery(
+                'headless-0',
+                claim_token=held['claim_token'],
+                reason='ENGINE_STOP_UNPROVEN',
+            )
+
+        # 5. Server-verified zero-VRAM + monotonic gpu_epoch=12 + clean workspace scrub -> 200, reconciling task failed, pin released!
         worker_state['scrub_ok'] = True
-        c_ok, p_ok = self._http(
+        c_ok, p_ok = self._ops_http(
             'POST',
-            '/internal/dashboard/headless-pool/clear-quarantine',
+            '/internal/v1/headless-pool/clear-quarantine',
             {'idempotency_key': request_id()},
         )
         self.assertEqual(c_ok, 200, p_ok)
         self.assertFalse(p_ok['quarantined'])
-        self.assertIn(rec_task_id, p_ok['reconciled_task_ids'])
+        self.assertEqual(p_ok['engine_epoch'], 12)
+        self.assertEqual(p_ok['reconciled_task_count'], 1)
+        self.assertNotIn('reconciled_task_ids', p_ok)
         self.assertFalse(self.headless_runner.quarantined)
         self.assertFalse(residual_dir.exists())
         self.assertEqual(self.model_cache.get_model_status(sdxl_entry['model_id'])['active_pins'], 0)

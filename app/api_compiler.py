@@ -17,7 +17,7 @@ DEFAULT_MAX_PIXELS = 1048576  # 1024 x 1024
 DEFAULT_MAX_FRAMES = 128
 
 NODE_ID_RE = re.compile(r'^[1-9][0-9]{0,5}\Z')
-SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\Z')
+SLUG_RE = re.compile(r'^[a-z][a-z0-9-]{2,62}[a-z0-9]\Z')
 SEMVER_RE = re.compile(r'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
 PARAM_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}\Z')
 SAFE_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,120}\.safetensors\Z')

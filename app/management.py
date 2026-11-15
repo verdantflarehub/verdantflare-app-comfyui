@@ -1594,20 +1594,9 @@ class InstanceManager:
             principal.user_id,
             is_admin=is_admin,
         )
-        headless_pool = None
-        if is_admin and self.headless_runner is not None and hasattr(self.store, 'inspect_headless_worker_pool'):
-            pool_info = self.store.inspect_headless_worker_pool(self.headless_runner.worker_id)
-            headless_pool = {
-                'worker_id': self.headless_runner.worker_id,
-                'quarantined': bool(pool_info.get('quarantined') or self.headless_runner.quarantined),
-                'quarantine_reason': pool_info.get('quarantine_reason') or self.headless_runner.quarantine_reason,
-                'dirty_task_id': pool_info.get('dirty_task_id') or self.headless_runner.dirty_task_id,
-                'engine_epoch': int(pool_info.get('engine_epoch') or self.headless_runner.engine_epoch),
-            }
         return {
             'schema_version': 1,
             'can_mount_channel': is_admin,
-            'headless_pool': headless_pool,
             'items': [self._format_dashboard_workflow_api(r) for r in rows],
             'smoke_candidates': candidates,
         }
@@ -1855,11 +1844,8 @@ class InstanceManager:
             out['png_base64'] = encoded
         return out
 
-    def clear_headless_quarantine(self, principal, body):
-        self.authorize(principal)
-        is_admin = bool(getattr(principal, 'is_admin', False))
-        if not is_admin:
-            raise Error('FORBIDDEN', 403)
+    def clear_headless_quarantine_ops(self, body):
+        """Platform/runtime internal ops recovery for the shared headless worker pool (never exposed to customer Studio)."""
         if (
             not isinstance(body, dict)
             or set(body.keys()) - {'idempotency_key', 'worker_id'}
@@ -1885,12 +1871,19 @@ class InstanceManager:
             code = str(exc)
             if code == 'FORBIDDEN':
                 raise Error('FORBIDDEN', 403) from None
-            if code == 'HEADLESS_WORKER_ACTIVE':
-                raise Error('HEADLESS_WORKER_ACTIVE', 409) from None
+            if code in ('HEADLESS_WORKER_ACTIVE', 'OPERATION_IN_PROGRESS'):
+                raise Error(code, 409) from None
             raise Error(code, 503) from None
         if self.model_cache is not None and hasattr(self.store, 'flush_model_pin_release_outbox'):
             try:
                 self.store.flush_model_pin_release_outbox(self.model_cache)
             except Exception:
                 pass
-        return res
+        reconciled = res.get('reconciled_task_ids') if isinstance(res, dict) else None
+        return {
+            'schema_version': 1,
+            'worker_id': res['worker_id'],
+            'quarantined': bool(res['quarantined']),
+            'engine_epoch': int(res['engine_epoch']),
+            'reconciled_task_count': len(reconciled) if isinstance(reconciled, list) else 0,
+        }

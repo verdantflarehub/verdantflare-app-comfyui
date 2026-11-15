@@ -1031,25 +1031,8 @@ export function readWorkflowApis(data) {
           }),
         )
     : [];
-  const rawPool =
-    data.headless_pool && typeof data.headless_pool === 'object' && !Array.isArray(data.headless_pool)
-      ? data.headless_pool
-      : null;
-  const headlessPool = rawPool
-    ? Object.freeze({
-        workerId: String(rawPool.worker_id ?? ''),
-        quarantined: Boolean(rawPool.quarantined),
-        quarantineReason: rawPool.quarantine_reason ? String(rawPool.quarantine_reason) : null,
-        dirtyTaskId: rawPool.dirty_task_id ? String(rawPool.dirty_task_id) : null,
-        engineEpoch:
-          Number.isSafeInteger(rawPool.engine_epoch) && rawPool.engine_epoch >= 1
-            ? rawPool.engine_epoch
-            : 1,
-      })
-    : null;
   return Object.freeze({
     canMountChannel: Boolean(data.can_mount_channel),
-    headlessPool,
     items,
     smokeCandidates,
   });

@@ -1375,6 +1375,203 @@ class ComfyPAEscapeAndArtifactsTest(unittest.TestCase):
         self.assertEqual(prow_b['quarantined'], 1)
         self.assertEqual(prow_b['dirty_task_id'], t3['id'])
 
+    def test_station_artifact_v2_strict_wire_and_model_cache_query(self):
+        import hashlib
+        import http.server
+        import json
+        import tempfile
+        from urllib.parse import parse_qs, urlsplit
+        from app.models import ModelCacheClient
+        from app.protocol import ProjectAccess, request_id, valid_id
+
+        store_id = request_id()
+        uploads = {}
+        versions = {}
+        legacy_refs = {}
+
+        class StrictV2Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def _json(self, code, obj):
+                raw = json.dumps(obj).encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):
+                rid = self.headers.get('X-Request-Id', '')
+                org = self.headers.get('X-Organization-Id', '')
+                uid = self.headers.get('X-User-Id', '')
+                if not all(valid_id(x) for x in (rid, org, uid)):
+                    return self._json(403, {'code': 'PERMISSION_DENIED', 'message': 'bad principal', 'request_id': rid})
+                clen = int(self.headers.get('Content-Length') or '0')
+                raw = self.rfile.read(clen) if clen > 0 else b''
+                u = urlsplit(self.path)
+                if u.path == '/internal/v1/project/open':
+                    body = json.loads(raw.decode('utf-8'))
+                    assert body.get('require_write') is True
+                    return self._json(200, {'project_id': body['project_id'], 'revision_id': request_id()})
+                if u.path == '/v2/artifacts/uploads':
+                    body = json.loads(raw.decode('utf-8'))
+                    if set(body.keys()) - {'write_id', 'artifact_id', 'source', 'sha256', 'size', 'mime'}:
+                        return self._json(400, {'code': 'INVALID_ARGUMENT', 'message': 'unknown field', 'request_id': rid})
+                    up_id = request_id()
+                    art_id = request_id()
+                    ver_id = request_id()
+                    uploads[up_id] = {
+                        'upload_id': up_id, 'artifact_id': art_id, 'version_id': ver_id,
+                        'org': org, 'source': body['source'], 'sha256': body['sha256'],
+                        'size': body['size'], 'mime': body['mime'], 'state': 'prepared', 'bytes': b'',
+                    }
+                    return self._json(200, {
+                        'upload_id': up_id, 'artifact_id': art_id, 'version_id': ver_id,
+                        'state': 'prepared', 'content_path': f'/v2/artifacts/uploads/{up_id}/content',
+                    })
+                if u.path.startswith('/v2/artifacts/uploads/') and u.path.endswith('/commit'):
+                    if raw:
+                        return self._json(400, {'code': 'INVALID_ARGUMENT', 'message': 'commit body must be empty', 'request_id': rid})
+                    up_id = u.path.split('/')[4]
+                    up = uploads[up_id]
+                    ver = {
+                        'schema_version': 2, 'store_id': store_id,
+                        'artifact_id': up['artifact_id'], 'version_id': up['version_id'],
+                        'organization_id': org, 'sha256': up['sha256'], 'size': up['size'],
+                        'mime': up['mime'], 'source': up['source'], 'bytes': up['bytes'],
+                    }
+                    versions[up['version_id']] = ver
+                    if up['source'].get('kind') == 'legacy_import':
+                        oref = up['source']['original_ref']
+                        legacy_refs[(org, oref['service_id'], oref['artifact_id'], oref['version_id'])] = up['version_id']
+                    return self._json(200, {k: v for k, v in ver.items() if k != 'bytes'})
+                if u.path == '/v2/artifacts/legacy/resolve':
+                    src = json.loads(raw.decode('utf-8'))
+                    oref = src['original_ref']
+                    vid = legacy_refs.get((org, oref['service_id'], oref['artifact_id'], oref['version_id']))
+                    if not vid:
+                        return self._json(404, {'code': 'NOT_FOUND', 'message': 'Artifact request failed', 'request_id': rid})
+                    ver = versions[vid]
+                    return self._json(200, {k: v for k, v in ver.items() if k != 'bytes'})
+                return self._json(404, {'code': 'NOT_FOUND', 'message': 'not found', 'request_id': rid})
+
+            def do_PUT(self):
+                u = urlsplit(self.path)
+                up_id = u.path.split('/')[4]
+                clen = int(self.headers.get('Content-Length') or '0')
+                uploads[up_id]['bytes'] = self.rfile.read(clen)
+                self._json(200, {'upload_id': up_id, 'state': 'uploaded'})
+
+            def do_GET(self):
+                u = urlsplit(self.path)
+                q = parse_qs(u.query)
+                if u.path == '/internal/v1/model-cache/models':
+                    assert q.get('limit') == ['10']
+                    assert q.get('category') == ['CKPT']
+                    return self._json(200, {'models': [], 'next_cursor': None})
+                if u.path.startswith('/v2/artifacts/') and u.path.endswith('/content'):
+                    if set(q.keys()) != {'store_id', 'artifact_id'} or q['store_id'][0] != store_id:
+                        return self._json(400, {'code': 'INVALID_ARGUMENT', 'message': 'bad query', 'request_id': request_id()})
+                    vid = u.path.split('/')[3]
+                    ver = versions.get(vid)
+                    if not ver or ver['artifact_id'] != q['artifact_id'][0]:
+                        return self._json(404, {'code': 'NOT_FOUND', 'message': 'not found', 'request_id': request_id()})
+                    self.send_response(200)
+                    self.send_header('Content-Type', ver['mime'])
+                    self.send_header('Content-Length', str(len(ver['bytes'])))
+                    self.end_headers()
+                    self.wfile.write(ver['bytes'])
+                    return
+                return self._json(404, {'code': 'NOT_FOUND', 'message': 'not found', 'request_id': request_id()})
+
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), StrictV2Handler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        origin = f'http://127.0.0.1:{srv.server_port}'
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                db_file = str(Path(td) / 'art.sqlite3')
+                client = StudioArtifactClient(origin, 'a' * 32, db_path=db_file)
+                png = make_png_bytes(8, 8)
+                out = client.upload_artifact(
+                    USER_A, PROJECT_A,
+                    data=png, mime_type='image/png', filename='out_1_00001_.png',
+                    task_id=request_id(), node_id='9',
+                )
+                self.assertEqual(out['store_id'], store_id)
+                # Fresh client reading from SQLite index enforces cross-project 403 and same-project 200
+                client2 = StudioArtifactClient(origin, 'a' * 32, db_path=db_file)
+                read_ok = client2.read_artifact(USER_A, PROJECT_A, out['artifact_id'])
+                self.assertEqual(read_ok['data'], png)
+                with self.assertRaises(Error) as ctx_forbid:
+                    client2.read_artifact(USER_B, PROJECT_B, out['artifact_id'])
+                self.assertEqual(ctx_forbid.exception.status, 403)
+
+                # Legacy-import input handle uploaded to Project A resolves for Project A and 403s for Project B
+                in_handle = request_id()
+                import urllib.request
+                prep_req = urllib.request.Request(
+                    f'{origin}/v2/artifacts/uploads',
+                    data=json.dumps({
+                        'write_id': request_id(),
+                        'source': {
+                            'kind': 'legacy_import',
+                            'project_id': PROJECT_A,
+                            'original_ref': {'service_id': 'comfyui-input', 'artifact_id': in_handle, 'version_id': 'v1'},
+                        },
+                        'sha256': hashlib.sha256(png).hexdigest(),
+                        'size': len(png),
+                        'mime': 'image/png',
+                    }).encode('utf-8'),
+                    method='POST',
+                    headers={'Content-Type': 'application/json', 'X-Organization-Id': ORG, 'X-User-Id': USER_A.user_id, 'X-Request-Id': request_id()},
+                )
+                with urllib.request.urlopen(prep_req) as r:
+                    up_info = json.loads(r.read().decode('utf-8'))
+                put_req = urllib.request.Request(
+                    f"{origin}/v2/artifacts/uploads/{up_info['upload_id']}/content",
+                    data=png, method='PUT',
+                    headers={'Content-Type': 'image/png', 'Content-Length': str(len(png)), 'X-Organization-Id': ORG, 'X-User-Id': USER_A.user_id, 'X-Request-Id': request_id()},
+                )
+                urllib.request.urlopen(put_req).close()
+                com_req = urllib.request.Request(
+                    f"{origin}/v2/artifacts/uploads/{up_info['upload_id']}/commit",
+                    data=b'', method='POST',
+                    headers={'X-Organization-Id': ORG, 'X-User-Id': USER_A.user_id, 'X-Request-Id': request_id()},
+                )
+                urllib.request.urlopen(com_req).close()
+
+                in_ok = client2.read_artifact(USER_A, PROJECT_A, in_handle)
+                self.assertEqual(in_ok['data'], png)
+                with self.assertRaises(Error) as ctx_in_forbid:
+                    client2.read_artifact(USER_B, PROJECT_B, in_handle)
+                self.assertEqual(ctx_in_forbid.exception.status, 403)
+                with self.assertRaises(Error) as ctx_nf:
+                    client2.read_artifact(USER_A, PROJECT_A, request_id())
+                self.assertEqual(ctx_nf.exception.status, 404)
+
+                # ModelCacheClient.list_models query param encoding
+                mc = ModelCacheClient(origin, 'b' * 32, request_id())
+                res = mc.list_models(category='CKPT', limit=10)
+                self.assertEqual(res['items'], [])
+
+                # ProjectAccess with COMFYUI_PROJECT_OPEN_WRITE_ONLY=1
+                prev = os.environ.get('COMFYUI_PROJECT_OPEN_WRITE_ONLY')
+                os.environ['COMFYUI_PROJECT_OPEN_WRITE_ONLY'] = '1'
+                try:
+                    pa = ProjectAccess(origin, 'c' * 32, 'd' * 32)
+                    rev = pa.check(USER_A, PROJECT_A, write=True)
+                    self.assertTrue(valid_id(rev))
+                finally:
+                    if prev is None:
+                        os.environ.pop('COMFYUI_PROJECT_OPEN_WRITE_ONLY', None)
+                    else:
+                        os.environ['COMFYUI_PROJECT_OPEN_WRITE_ONLY'] = prev
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
 
 if __name__ == '__main__':
     unittest.main()

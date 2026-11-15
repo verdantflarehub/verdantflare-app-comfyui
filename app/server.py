@@ -133,6 +133,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if store is None:
                     raise Error('NOT_FOUND', 404)
                 return self.reply(200, store.revoke_or_verify_model_admission_intent(payload['reservation_id']))
+            if self.path == '/internal/v1/headless-pool/clear-quarantine':
+                if any(
+                    self.headers.get_all(name, [])
+                    for name in ('X-User-Id', 'X-Organization-Id', 'X-Organization-Admin', 'X-Station-Id')
+                ):
+                    raise Error('FORBIDDEN', 403)
+                maint = getattr(self.server, 'maintenance', None)
+                ops_token = getattr(self.server, 'residency_token', None) or (
+                    maint.token if maint is not None else None
+                )
+                if not token_valid(ops_token) or hmac.compare_digest(ops_token.encode(), self.server.token.encode()):
+                    raise Error('OPS_RECOVERY_NOT_CONFIGURED', 503)
+                tokens = self.headers.get_all('Authorization', [])
+                if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), ('Bearer ' + ops_token).encode()):
+                    raise Error('UNAUTHENTICATED', 401)
+                manager = getattr(self.server, 'manager', None)
+                if manager is None:
+                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
+                return self.reply(200, manager.clear_headless_quarantine_ops(self.body()))
             if self.path == '/internal/v1/comfyui/published-channels':
                 tokens = self.headers.get_all('Authorization', [])
                 if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), ('Bearer ' + self.server.token).encode()):
@@ -188,10 +207,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if manager is None:
                     raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
                 return self.reply(201, manager.publish_workflow_api(principal, self.body()))
-            if self.path == '/internal/dashboard/headless-pool/clear-quarantine':
-                if manager is None:
-                    raise Error('INSTANCE_MANAGEMENT_UNAVAILABLE', 503)
-                return self.reply(200, manager.clear_headless_quarantine(principal, self.body()))
             if self.path.startswith('/internal/dashboard/workflow-apis/'):
                 parts = self.path[len('/internal/dashboard/workflow-apis/'):].split('/')
                 if len(parts) != 2 or parts[1] != 'unpublish':
@@ -533,7 +548,7 @@ def main():
         if artifact_token in credentials or not token_valid(artifact_token):
             raise ValueError('distinct artifact credential required')
         credentials.add(artifact_token)
-        artifact_store = StudioArtifactClient(artifact_origin, artifact_token)
+        artifact_store = StudioArtifactClient(artifact_origin, artifact_token, db_path=config.get('database'))
 
     headless_runner = None
     headless_worker_origin = config.get('headless_worker_origin') or os.environ.get('COMFYUI_HEADLESS_WORKER_ORIGIN')

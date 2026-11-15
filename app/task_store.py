@@ -265,6 +265,9 @@ class TaskStore:
                 dirty_prompt_id TEXT,
                 quarantined INTEGER NOT NULL DEFAULT 0,
                 quarantine_reason TEXT,
+                recovery_claim_token TEXT,
+                recovery_owner_process_id TEXT,
+                recovery_claimed_ns INTEGER,
                 engine_epoch INTEGER NOT NULL DEFAULT 1,
                 completed_runs INTEGER NOT NULL DEFAULT 0,
                 updated_ns INTEGER NOT NULL
@@ -357,6 +360,14 @@ class TaskStore:
             ]:
                 if name not in diag_columns:
                     db.execute(f'ALTER TABLE instance_diagnostics_state ADD COLUMN {name} {definition}')
+            pool_columns = {row[1] for row in db.execute('PRAGMA table_info(headless_worker_pool)')}
+            for name, definition in [
+                ('recovery_claim_token', 'TEXT'),
+                ('recovery_owner_process_id', 'TEXT'),
+                ('recovery_claimed_ns', 'INTEGER'),
+            ]:
+                if name not in pool_columns:
+                    db.execute(f'ALTER TABLE headless_worker_pool ADD COLUMN {name} {definition}')
 
     @contextmanager
     def transaction(self):
@@ -2469,7 +2480,25 @@ class TaskStore:
         result = None
         with self.transaction() as db:
             row = self._ensure_headless_worker_row_in_tx(db, worker_id)
-            if row['quarantined']:
+            if row['recovery_claim_token']:
+                if self._is_owner_process_stale(
+                    row['recovery_owner_process_id'],
+                    my_pid=os.getpid(),
+                    exclude_process_id=self.process_id,
+                ):
+                    db.execute(
+                        '''UPDATE headless_worker_pool
+                           SET quarantined=1,
+                               quarantine_reason=COALESCE(quarantine_reason, 'RECOVERY_OWNER_CRASHED'),
+                               recovery_claim_token=NULL,
+                               recovery_owner_process_id=NULL,
+                               recovery_claimed_ns=NULL,
+                               updated_ns=?
+                           WHERE worker_id=?''',
+                        (time.time_ns(), worker_id),
+                    )
+                quarantined_now = True
+            elif row['quarantined']:
                 quarantined_now = True
             elif row['active_task_id'] and self._is_owner_process_stale(
                 row['owner_process_id'],
@@ -2498,7 +2527,25 @@ class TaskStore:
             claimed_result = None
             with self.transaction() as db:
                 pool_row = self._ensure_headless_worker_row_in_tx(db, worker_id)
-                if pool_row['quarantined']:
+                if pool_row['recovery_claim_token']:
+                    if self._is_owner_process_stale(
+                        pool_row['recovery_owner_process_id'],
+                        my_pid=os.getpid(),
+                        exclude_process_id=self.process_id,
+                    ):
+                        db.execute(
+                            '''UPDATE headless_worker_pool
+                               SET quarantined=1,
+                                   quarantine_reason=COALESCE(quarantine_reason, 'RECOVERY_OWNER_CRASHED'),
+                                   recovery_claim_token=NULL,
+                                   recovery_owner_process_id=NULL,
+                                   recovery_claimed_ns=NULL,
+                                   updated_ns=?
+                               WHERE worker_id=?''',
+                            (time.time_ns(), worker_id),
+                        )
+                    quarantined_now = True
+                elif pool_row['quarantined']:
                     quarantined_now = True
                 elif pool_row['active_task_id']:
                     if self._is_owner_process_stale(
@@ -2531,29 +2578,33 @@ class TaskStore:
                             raise TaskError('INVALID_TRANSITION')
                         attempt_id = str(uuid.uuid4())
                         ts = time.time_ns()
-                        db.execute(
-                            '''UPDATE tasks
-                               SET state='running',
-                                   attempt_worker_id=?,
-                                   attempt_id=?,
-                                   error=NULL
-                               WHERE id=? AND generation=?''',
-                            (worker_id, attempt_id, task_id, generation),
-                        )
-                        db.execute(
+                        cur_pool = db.execute(
                             '''UPDATE headless_worker_pool
                                SET active_task_id=?,
                                    active_attempt_id=?,
                                    owner_process_id=?,
                                    updated_ns=?
-                               WHERE worker_id=?''',
+                               WHERE worker_id=?
+                                 AND quarantined=0
+                                 AND active_attempt_id IS NULL
+                                 AND recovery_claim_token IS NULL''',
                             (task_id, attempt_id, self.process_id, ts, worker_id),
                         )
-                        claimed_result = {
-                            'status': 'claimed',
-                            'attempt_id': attempt_id,
-                            'pool_state': dict(pool_row),
-                        }
+                        if cur_pool.rowcount == 1:
+                            db.execute(
+                                '''UPDATE tasks
+                                   SET state='running',
+                                       attempt_worker_id=?,
+                                       attempt_id=?,
+                                       error=NULL
+                                   WHERE id=? AND generation=?''',
+                                (worker_id, attempt_id, task_id, generation),
+                            )
+                            claimed_result = {
+                                'status': 'claimed',
+                                'attempt_id': attempt_id,
+                                'pool_state': dict(pool_row),
+                            }
             if quarantined_now:
                 raise TaskError('HEADLESS_POOL_QUARANTINED')
             if claimed_result is not None:
@@ -2828,31 +2879,19 @@ class TaskStore:
             ]
             return out
 
-    def clear_headless_pool_quarantine(
+    def begin_headless_pool_quarantine_recovery(
         self,
         worker_id: str,
         *,
-        stop_proof: dict,
         is_admin: bool,
-        code: str = 'HEADLESS_QUARANTINE_RECONCILED',
     ) -> dict:
-        """Clear `headless_worker_pool.quarantined` ONLY for an admin caller after server-verified stop + zero-VRAM + workspace scrub proof."""
+        """Atomically claim an exclusive cross-process recovery fence on `headless_worker_pool` before remote eviction or disk scrub."""
         if not is_admin:
             raise TaskError('FORBIDDEN')
-        if not isinstance(code, str) or not code.isascii() or not code.replace('_', '').isalnum() or len(code) > 64:
-            raise TaskError('INVALID_ERROR_CODE')
-        if (
-            not isinstance(stop_proof, dict)
-            or stop_proof.get('residency_state') != 'zero_vram_standby'
-            or stop_proof.get('vram_allocated_mib') != 0
-            or type(stop_proof.get('gpu_epoch')) is not int
-            or stop_proof.get('scrubbed') is not True
-        ):
-            raise TaskError('ENGINE_STOP_UNPROVEN')
-
+        claim_token = str(uuid.uuid4())
         with self.transaction() as db:
             pool_row = self._ensure_headless_worker_row_in_tx(db, worker_id)
-            if pool_row['active_task_id']:
+            if pool_row['active_task_id'] or pool_row['active_attempt_id']:
                 if self._is_owner_process_stale(
                     pool_row['owner_process_id'],
                     my_pid=os.getpid(),
@@ -2862,6 +2901,100 @@ class TaskStore:
                     pool_row = db.execute('SELECT * FROM headless_worker_pool WHERE worker_id=?', (worker_id,)).fetchone()
                 else:
                     raise TaskError('HEADLESS_WORKER_ACTIVE')
+
+            if pool_row['recovery_claim_token']:
+                if not self._is_owner_process_stale(
+                    pool_row['recovery_owner_process_id'],
+                    my_pid=os.getpid(),
+                    exclude_process_id=self.process_id,
+                ):
+                    raise TaskError('OPERATION_IN_PROGRESS')
+
+            ts = time.time_ns()
+            cur = db.execute(
+                '''UPDATE headless_worker_pool
+                   SET quarantined=1,
+                       quarantine_reason=COALESCE(quarantine_reason, 'ADMIN_QUARANTINE_RECOVERY'),
+                       recovery_claim_token=?,
+                       recovery_owner_process_id=?,
+                       recovery_claimed_ns=?,
+                       updated_ns=?
+                   WHERE worker_id=? AND active_attempt_id IS NULL''',
+                (claim_token, self.process_id, ts, ts, worker_id),
+            )
+            if cur.rowcount != 1:
+                raise TaskError('HEADLESS_WORKER_ACTIVE')
+            pool_row = db.execute('SELECT * FROM headless_worker_pool WHERE worker_id=?', (worker_id,)).fetchone()
+            rec_rows = db.execute(
+                '''SELECT id, prompt_id FROM tasks
+                   WHERE execution_pool='headless_api'
+                     AND state='reconciling'
+                     AND (attempt_worker_id=? OR attempt_worker_id IS NULL)''',
+                (worker_id,),
+            ).fetchall()
+            out = dict(pool_row)
+            out['claim_token'] = claim_token
+            out['reconciling_tasks'] = [
+                {'task_id': r['id'], 'prompt_id': r['prompt_id']}
+                for r in rec_rows
+            ]
+            return out
+
+    def abort_headless_pool_quarantine_recovery(
+        self,
+        worker_id: str,
+        *,
+        claim_token: str,
+        reason: str = 'QUARANTINE_RECOVERY_FAILED',
+    ) -> None:
+        if not isinstance(claim_token, str) or not claim_token.strip():
+            return
+        with self.transaction() as db:
+            db.execute(
+                '''UPDATE headless_worker_pool
+                   SET quarantined=1,
+                       quarantine_reason=COALESCE(quarantine_reason, ?),
+                       recovery_claim_token=NULL,
+                       recovery_owner_process_id=NULL,
+                       recovery_claimed_ns=NULL,
+                       updated_ns=?
+                   WHERE worker_id=? AND recovery_claim_token=?''',
+                (reason, time.time_ns(), worker_id, claim_token),
+            )
+
+    def clear_headless_pool_quarantine(
+        self,
+        worker_id: str,
+        *,
+        claim_token: str,
+        stop_proof: dict,
+        is_admin: bool,
+        code: str = 'HEADLESS_QUARANTINE_RECONCILED',
+    ) -> dict:
+        """Clear `headless_worker_pool.quarantined` ONLY for the recovery-claim holder after server-verified stop + zero-VRAM + workspace scrub proof."""
+        if not is_admin:
+            raise TaskError('FORBIDDEN')
+        if not isinstance(claim_token, str) or len(claim_token.strip()) < 16:
+            raise TaskError('OPERATION_IN_PROGRESS')
+        if not isinstance(code, str) or not code.isascii() or not code.replace('_', '').isalnum() or len(code) > 64:
+            raise TaskError('INVALID_ERROR_CODE')
+        if (
+            not isinstance(stop_proof, dict)
+            or stop_proof.get('residency_state') != 'zero_vram_standby'
+            or type(stop_proof.get('vram_allocated_mib')) is not int
+            or stop_proof.get('vram_allocated_mib') != 0
+            or type(stop_proof.get('gpu_epoch')) is not int
+            or stop_proof.get('gpu_epoch') < 1
+            or stop_proof.get('scrubbed') is not True
+        ):
+            raise TaskError('ENGINE_STOP_UNPROVEN')
+
+        with self.transaction() as db:
+            pool_row = self._ensure_headless_worker_row_in_tx(db, worker_id)
+            if pool_row['active_task_id'] or pool_row['active_attempt_id']:
+                raise TaskError('HEADLESS_WORKER_ACTIVE')
+            if pool_row['recovery_claim_token'] != claim_token:
+                raise TaskError('OPERATION_IN_PROGRESS')
 
             current_epoch = int(pool_row['engine_epoch'] or 1)
             next_epoch = int(stop_proof['gpu_epoch'])
@@ -2899,13 +3032,18 @@ class TaskStore:
                        active_task_id=NULL,
                        active_attempt_id=NULL,
                        owner_process_id=NULL,
+                       recovery_claim_token=NULL,
+                       recovery_owner_process_id=NULL,
+                       recovery_claimed_ns=NULL,
                        engine_epoch=?,
                        updated_ns=?
-                   WHERE worker_id=? AND active_attempt_id IS NULL''',
-                (next_epoch, time.time_ns(), worker_id),
+                   WHERE worker_id=?
+                     AND recovery_claim_token=?
+                     AND active_attempt_id IS NULL''',
+                (next_epoch, time.time_ns(), worker_id, claim_token),
             )
             if cur_pool.rowcount != 1:
-                raise TaskError('HEADLESS_WORKER_ACTIVE')
+                raise TaskError('OPERATION_IN_PROGRESS')
             return {
                 'worker_id': worker_id,
                 'quarantined': False,
