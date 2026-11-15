@@ -14,9 +14,13 @@ UUID7 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 
 
 class Error(Exception):
-    def __init__(self, code, status=400):
+    def __init__(self, code, status=400, *, details=None):
         self.code, self.status = code, status
+        self.details = dict(details) if isinstance(details, dict) else {}
         super().__init__(code)
+
+    def payload(self):
+        return {'code': self.code, **self.details}
 
 
 def valid_id(value):
@@ -37,11 +41,22 @@ def authenticate(headers, token):
     for name in ('Authorization', 'X-User-Id', 'X-Organization-Id'):
         if len(headers.get_all(name, [])) != 1:
             raise Error('UNAUTHENTICATED', 401)
+    admin_values = headers.get_all('X-Organization-Admin', [])
+    if len(admin_values) > 1:
+        raise Error('UNAUTHENTICATED', 401)
+    is_admin = False
+    if len(admin_values) == 1:
+        if admin_values[0] == 'true':
+            is_admin = True
+        elif admin_values[0] == 'false':
+            is_admin = False
+        else:
+            raise Error('UNAUTHENTICATED', 401)
     if not hmac.compare_digest(headers['Authorization'].encode(), ('Bearer ' + token).encode()):
         raise Error('UNAUTHENTICATED', 401)
     if not all(valid_id(headers[name]) for name in ('X-User-Id', 'X-Organization-Id')):
         raise Error('UNAUTHENTICATED', 401)
-    return Principal(headers['X-Organization-Id'], headers['X-User-Id'])
+    return Principal(headers['X-Organization-Id'], headers['X-User-Id'], is_admin=is_admin)
 
 
 def encode(value):
@@ -82,7 +97,8 @@ class JSONClient:
         self.origin, self.timeout, self.max_bytes = origin.rstrip('/'), timeout, max_bytes
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False, accepted_statuses=(200,)):
+    def request_with_headers(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False, accepted_statuses=(200,), passthrough_errors=False, max_bytes=None):
+        eff_max = self.max_bytes if max_bytes is None else int(max_bytes)
         if not path.startswith('/') or path.startswith('//') or any(c in path for c in '?%#\\\r\n'):
             raise Error('INVALID_INTERNAL_PATH')
         suffix = '?' + urllib.parse.urlencode(query) if query else ''
@@ -91,12 +107,13 @@ class JSONClient:
                                         headers={'Content-Type': 'application/json', **(headers or {})})
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
-                raw = response.read(self.max_bytes + 1)
-                if (response.status not in accepted_statuses or len(raw) > self.max_bytes
+                raw = response.read(eff_max + 1)
+                resp_headers = {k.lower(): v for k, v in response.headers.items()}
+                if (response.status not in accepted_statuses or len(raw) > eff_max
                         or response.headers.get('Content-Encoding')):
                     raise Error('DEPENDENCY_UNAVAILABLE', 503)
                 if empty and not raw:
-                    return {}
+                    return {}, resp_headers
                 if response.headers.get_content_type() != 'application/json':
                     raise Error('DEPENDENCY_UNAVAILABLE', 503)
                 try:
@@ -105,16 +122,37 @@ class JSONClient:
                     raise Error('DEPENDENCY_UNAVAILABLE', 503) from None
                 if object_only and not isinstance(result, dict):
                     raise Error('DEPENDENCY_UNAVAILABLE', 503)
-                return result
+                return result, resp_headers
         except urllib.error.HTTPError as exc:
             status = exc.code
+            err_body = None
+            if passthrough_errors:
+                try:
+                    raw_err = exc.read(16384)
+                    if raw_err:
+                        parsed_err = decode(raw_err)
+                        if isinstance(parsed_err, dict) and isinstance(parsed_err.get('code'), str):
+                            err_body = parsed_err
+                except Exception:
+                    err_body = None
             exc.close()
+            if err_body is not None:
+                extra = {k: v for k, v in err_body.items() if k != 'code'}
+                raise Error(err_body['code'], status, details=extra or None) from None
             if status == 404 and not_found:
                 raise Error('NOT_FOUND', 404) from None
             raise Error('PERMISSION_DENIED' if status in (401, 403) else 'DEPENDENCY_UNAVAILABLE',
                         403 if status in (401, 403) else 503) from None
         except (OSError, http.client.HTTPException, ValueError):
             raise Error('DEPENDENCY_UNAVAILABLE', 503) from None
+
+    def request(self, method, path, value=None, headers=None, *, empty=False, object_only=True, query=None, not_found=False, accepted_statuses=(200,), passthrough_errors=False, max_bytes=None):
+        return self.request_with_headers(
+            method, path, value, headers,
+            empty=empty, object_only=object_only, query=query,
+            not_found=not_found, accepted_statuses=accepted_statuses,
+            passthrough_errors=passthrough_errors, max_bytes=max_bytes,
+        )[0]
 
 
 class ProjectAccess:

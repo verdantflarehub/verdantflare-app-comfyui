@@ -134,7 +134,7 @@ def snapshot(model):
     def node(name, **inputs):
         return {'class_type': name, 'inputs': inputs}
     return {'workflow': {'nodes': [], 'links': []}, 'inputs': [],
-            'dependencies': [{k: model[k] for k in ('model_id', 'size', 'sha256')}],
+            'dependencies': [{'category': 'CKPT', **{k: model[k] for k in ('model_id', 'size', 'sha256')}}],
             'prompt': {
                 '1': node('CheckpointLoaderSimple', ckpt_name=model['model_id']),
                 '2': node('CLIPTextEncode', text='test', clip=['1', 1]),
@@ -416,7 +416,7 @@ class ServiceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertIn('result', value)
             if method == 'tools/list':
-                self.assertEqual(len(value['result']['tools']), 10)
+                self.assertEqual(len(value['result']['tools']), 25)
         status, _ = self.call('', {}, mcp=True, raw=encode({'jsonrpc': '2.0', 'method': 'notifications/initialized'}))
         self.assertEqual(status, 202)
         status, _ = self.call('', {}, mcp=True, raw=encode({'jsonrpc': '2.0', 'method': 'tools/call', 'params': {'name': 'task.submit'}}))

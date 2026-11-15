@@ -18,7 +18,8 @@ def main():
     definition = json.loads(raw)
     for tool in definition['tools']:
         Draft202012Validator.check_schema(tool['inputSchema'])
-    value = {'generated_from': 'verdantflare-design/docs/design/app/comfyui/mcp-tools.dev.json',
+    generated_from = 'verdantflare-design/docs/design/app/comfyui/' + args.source.name
+    value = {'generated_from': generated_from,
              'source_sha256': hashlib.sha256(raw).hexdigest(), **definition}
     encoded = json.dumps(value, ensure_ascii=False, indent=2) + '\n'
     output = ROOT / 'app/generated_tools.json'

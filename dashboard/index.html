@@ -14,15 +14,24 @@
 <body data-embedded="true">
   <main id="dashboard"
         class="comfyui-dashboard">
-    <div class="breadcrumb-bar">
+    <div id="crumbWrap"
+         class="breadcrumb-bar"
+         hidden>
       <nav id="comfyuiBreadcrumb"
            class="breadcrumb"
            aria-label="面包屑">
-        <span>ComfyUI</span>
+        <a href="#/apps/comfyui/"
+           data-crumb-back>ComfyUI</a>
         <span aria-hidden="true">/</span>
-        <span aria-current="page">实例列表</span>
+        <span id="crumbCurrent"
+              aria-current="page">已发布工作流 API</span>
       </nav>
+      <div id="crumbMeta"
+           class="actions">
+        <span class="badge running num"><span class="dot"></span>无头执行池：/mcp/comfyui-api · 在线</span>
+      </div>
     </div>
+
     <header id="appHeader"
             class="topline studio-app-heading">
       <div class="brand">
@@ -42,9 +51,9 @@
         <div>
           <div class="title-line">
             <h1>ComfyUI</h1>
-            <span class="badge running"><span class="dot"></span>5090 节点工作站</span>
+            <span class="badge running"><span class="dot"></span>创作实例与生产 API 工作站</span>
           </div>
-          <p class="subtitle">云端节点流生成工作站 · 独立工作区与 5090 算力管理</p>
+          <p class="subtitle">交互画布与无头生产池（/mcp/comfyui-api）物理隔离、共享 /models:ro CAS 模型库与 :5056 显存账本</p>
         </div>
       </div>
       <div class="actions">
@@ -61,6 +70,22 @@
                aria-hidden="true">
             <path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6" />
           </svg>刷新
+        </button>
+        <button id="open-publish"
+                class="btn"
+                type="button"
+                hidden>
+          <svg class="icon"
+               viewBox="0 0 24 24"
+               fill="none"
+               stroke="currentColor"
+               stroke-width="1.7"
+               stroke-linecap="round"
+               stroke-linejoin="round"
+               aria-hidden="true">
+            <path d="M12 16V4m0 0-4 4m4-4 4 4" />
+            <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
+          </svg>发布工作流 API
         </button>
         <button id="create"
                 class="btn primary"
@@ -79,69 +104,166 @@
         </button>
       </div>
     </header>
-    <div class="toolbar filterbar">
-      <div id="filters"
-           class="filters filter-pills"
-           role="group"
-           aria-label="运行状态筛选">
-        <button type="button"
-                class="filter filter-pill"
-                data-filter="all"
-                aria-pressed="true"><span>全部</span><span id="count-all"
-                class="filter-count num">0</span></button>
-        <button type="button"
-                class="filter filter-pill"
-                data-filter="running"
-                aria-pressed="false"><span>运行中</span><span id="count-running"
-                class="filter-count num">0</span></button>
-        <button type="button"
-                class="filter filter-pill"
-                data-filter="stopped"
-                aria-pressed="false"><span>已停止</span><span id="count-stopped"
-                class="filter-count num">0</span></button>
-        <button type="button"
-                class="filter filter-pill"
-                data-filter="failed"
-                aria-pressed="false"><span>异常</span><span id="count-failed"
-                class="filter-count num">0</span></button>
-      </div>
-      <div class="filterbar-right">
-        <label class="search">
-          <span class="sr-only">搜索实例</span>
-          <svg class="icon"
-               viewBox="0 0 24 24"
-               fill="none"
-               stroke="currentColor"
-               stroke-width="1.7"
-               stroke-linecap="round"
-               stroke-linejoin="round"
-               aria-hidden="true">
-            <circle cx="10"
-                    cy="10"
-                    r="6" />
-            <path d="m15 15 5 5" />
-          </svg>
-          <input id="search"
-                 type="search"
-                 placeholder="搜索实例名称、ID 或工作流"
-                 autocomplete="off">
-        </label>
-      </div>
+
+    <div class="view-tabs"
+         role="tablist"
+         aria-label="ComfyUI 视图切换">
+      <button id="tab-instances"
+              type="button"
+              class="view-tab active"
+              role="tab"
+              aria-selected="true"
+              data-view="instances">
+        <span>实例列表</span>
+        <span id="tab-instances-count"
+              class="tab-count num">0</span>
+      </button>
+      <button id="tab-apis"
+              type="button"
+              class="view-tab"
+              role="tab"
+              aria-selected="false"
+              data-view="apis">
+        <span>已发布工作流 API</span>
+        <span id="tab-apis-count"
+              class="tab-count num">0</span>
+      </button>
     </div>
+
     <p id="message"
        class="status-banner"
        role="status"
        aria-live="polite"
        hidden>正在加载实例…</p>
-    <div id="instances"
-         aria-label="实例列表"></div>
+
+    <section id="section-instances"
+             aria-label="受管创作实例视图">
+      <div class="toolbar filterbar">
+        <div id="filters"
+             class="filters filter-pills"
+             role="group"
+             aria-label="运行状态筛选">
+          <button type="button"
+                  class="filter filter-pill"
+                  data-filter="all"
+                  aria-pressed="true"><span>全部</span><span id="count-all"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-filter="running"
+                  aria-pressed="false"><span>运行中</span><span id="count-running"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-filter="stopped"
+                  aria-pressed="false"><span>已停止</span><span id="count-stopped"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-filter="failed"
+                  aria-pressed="false"><span>异常</span><span id="count-failed"
+                  class="filter-count num">0</span></button>
+        </div>
+        <div class="filterbar-right">
+          <label class="search">
+            <span class="sr-only">搜索实例</span>
+            <svg class="icon"
+                 viewBox="0 0 24 24"
+                 fill="none"
+                 stroke="currentColor"
+                 stroke-width="1.7"
+                 stroke-linecap="round"
+                 stroke-linejoin="round"
+                 aria-hidden="true">
+              <circle cx="10"
+                      cy="10"
+                      r="6" />
+              <path d="m15 15 5 5" />
+            </svg>
+            <input id="search"
+                   type="search"
+                   placeholder="搜索实例名称、ID 或工作卷"
+                   autocomplete="off">
+          </label>
+        </div>
+      </div>
+      <div id="instances"
+           aria-label="实例列表"></div>
+    </section>
+
+    <section id="section-apis"
+             aria-label="已发布生产 API 视图"
+             hidden>
+      <div class="pool-strip"
+           aria-label="无头生产 API 执行池状态">
+        <div>
+          <strong>无头生产执行池（D5-A 逻辑分离、显存共享）</strong> · 聚合入口 <code>/mcp/comfyui-api</code> 独立承接线上调用，绝不抢占创作者画布编辑锁或污染草稿。
+        </div>
+        <div class="pool-strip-metrics">
+          <span>只读模型库：<b>/models:ro</b></span>
+          <span>调度账本：<b>:5056 联合显存锁</b></span>
+          <span>渠道标签：<b>本地</b>（Image / Video MCP）</span>
+        </div>
+      </div>
+      <div class="toolbar filterbar">
+        <div id="api-filters"
+             class="filters filter-pills"
+             role="group"
+             aria-label="生产 API 筛选">
+          <button type="button"
+                  class="filter filter-pill"
+                  data-api-filter="all"
+                  aria-pressed="true"><span>全部版本</span><span id="api-count-all"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-api-filter="mounted"
+                  aria-pressed="false"><span>已挂本地渠道</span><span id="api-count-mounted"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-api-filter="internal"
+                  aria-pressed="false"><span>仅 ComfyUI 内部</span><span id="api-count-internal"
+                  class="filter-count num">0</span></button>
+          <button type="button"
+                  class="filter filter-pill"
+                  data-api-filter="unpublished"
+                  aria-pressed="false"><span>已撤回下架</span><span id="api-count-unpublished"
+                  class="filter-count num">0</span></button>
+        </div>
+        <div class="filterbar-right">
+          <label class="search">
+            <span class="sr-only">搜索生产 API</span>
+            <svg class="icon"
+                 viewBox="0 0 24 24"
+                 fill="none"
+                 stroke="currentColor"
+                 stroke-width="1.7"
+                 stroke-linecap="round"
+                 stroke-linejoin="round"
+                 aria-hidden="true">
+              <circle cx="10"
+                      cy="10"
+                      r="6" />
+              <path d="m15 15 5 5" />
+            </svg>
+            <input id="api-search"
+                   type="search"
+                   placeholder="搜索 endpoint_slug、名称或 MDL-* 编号"
+                   autocomplete="off">
+          </label>
+        </div>
+      </div>
+      <div id="workflow-apis"
+           aria-label="已发布生产 API 列表"></div>
+    </section>
 
     <dialog id="create-dialog"
             class="dialog"
             aria-labelledby="create-dialog-title">
       <form id="create-form">
-        <h2 id="create-dialog-title">创建 ComfyUI 实例</h2>
-        <p class="dialog-desc">基础 CPU 环境。创建后处于「未启动」状态，不提前占用计算资源；需要时在列表中点击「启动」即可打开官方编辑器。</p>
+        <h2 id="create-dialog-title">创建 ComfyUI 受管实例</h2>
+        <p class="dialog-desc">创建后处于「未启动」状态，不提前占用计算资源；启动时自动挂载只读模型库 <code>/models:ro</code> 与独立工作卷。</p>
         <label class="field">
           <span>实例名称</span>
           <input id="create-name"
@@ -150,6 +272,25 @@
                  autocomplete="off"
                  placeholder="例如：ComfyUI 环境 01">
         </label>
+        <div class="field">
+          <span>运行规格 (Profile)</span>
+          <div id="create-profiles"
+               class="profile-choice-grid">
+            <label class="profile-choice">
+              <div><input type="radio"
+                       name="profile_id"
+                       value="gpu-shared"
+                       checked><strong>共享 GPU (gpu-shared)</strong></div>
+              <small class="muted">RTX 5090 联合显存调度 (:5056) · D4-A 白名单节点集 · /models:ro</small>
+            </label>
+            <label class="profile-choice">
+              <div><input type="radio"
+                       name="profile_id"
+                       value="base-cpu"><strong>基础 CPU (base-cpu)</strong></div>
+              <small class="muted">零显存占用拓扑编排与导出调试</small>
+            </label>
+          </div>
+        </div>
         <div class="field">
           <span>初始工作流（可选）</span>
           <div class="workflow-picker">
@@ -217,6 +358,141 @@
                 type="button"
                 disabled>确认销毁</button>
       </div>
+    </dialog>
+
+    <dialog id="deps-dialog"
+            class="dialog dialog-wide"
+            aria-labelledby="deps-dialog-title">
+      <h2 id="deps-dialog-title">模型依赖预检</h2>
+      <p class="dialog-desc">挂载路径 <code>/models:ro</code>（只读硬链接视图）· 联动模型缓存库七态生命周期。</p>
+      <div id="deps-dialog-body"
+           class="drawer-box"
+           style="margin-top: 12px;"></div>
+      <div class="dialog-actions">
+        <button id="deps-close"
+                class="btn primary"
+                type="button">关闭</button>
+      </div>
+    </dialog>
+
+    <dialog id="publish-drawer"
+            class="publish-drawer"
+            aria-labelledby="publish-drawer-title">
+      <form id="publish-form"
+            class="drawer-shell">
+        <div class="drawer-header">
+          <div>
+            <h2 id="publish-drawer-title">发布工作流为生产 API (WorkflowAPISpec v1)</h2>
+            <small class="muted">固化不可变 API 模板、canonical_model_lock_v1 模型静态锁与服务端权威显存预算</small>
+          </div>
+          <button id="publish-close"
+                  class="btn sm"
+                  type="button">关闭</button>
+        </div>
+        <div class="drawer-body">
+          <label class="field"
+                 style="margin-top: 0;">
+            <span>来源冒烟通过草稿（三方 prompt_sha256 恒等锁）</span>
+            <select id="pub-smoke-select"></select>
+          </label>
+          <div class="drawer-row-3">
+            <label class="field">
+              <span>端点标识 (endpoint_slug)</span>
+              <input id="pub-slug"
+                     required
+                     pattern="[a-z0-9][a-z0-9-]{1,62}[a-z0-9]"
+                     autocomplete="off"
+                     placeholder="例如：sdxl-lora-img2img">
+            </label>
+            <label class="field">
+              <span>语义版本 (SemVer)</span>
+              <input id="pub-version"
+                     required
+                     value="1.0.0"
+                     autocomplete="off">
+            </label>
+            <label class="field">
+              <span>输出模态 (output_modality)</span>
+              <select id="pub-modality">
+                <option value="image"
+                        selected>图像 (image)</option>
+                <option value="video">视频 (video)</option>
+              </select>
+            </label>
+          </div>
+          <label class="field"
+                 style="margin-top: 0;">
+            <span>生产 API 显示名称</span>
+            <input id="pub-title"
+                   required
+                   maxlength="128"
+                   autocomplete="off"
+                   placeholder="例如：SDXL Lightning LoRA 图生图">
+          </label>
+          <div class="drawer-box">
+            <h3>暴露入参契约（extract_spec 自动提取）</h3>
+            <ul id="pub-inputs-list"
+                class="spec-list"></ul>
+          </div>
+          <div class="drawer-box">
+            <h3 id="pub-mount-heading">发布范围与渠道挂载（D1-A 双层开放）</h3>
+            <div class="radio-stack">
+              <label class="radio-option">
+                <input type="radio"
+                       name="pub_mount_channel"
+                       value="none"
+                       checked>
+                <div>
+                  <strong>仅在 ComfyUI MCP 内开放（<code>/mcp/comfyui-api</code> → <code>api.invoke</code>）</strong>
+                  <div class="muted">无头生产池独立执行，不改动全局图像/视频模型目录。</div>
+                </div>
+              </label>
+              <label class="radio-option">
+                <input type="radio"
+                       name="pub_mount_channel"
+                       value="image">
+                <div>
+                  <strong>同步挂载至图像生产模型目录（渠道角标固定显示：本地）</strong>
+                  <div class="muted">需站点/组织管理员权限且 <code>output_modality == "image"</code>。</div>
+                </div>
+              </label>
+              <label class="radio-option">
+                <input type="radio"
+                       name="pub_mount_channel"
+                       value="video">
+                <div>
+                  <strong>同步挂载至视频生产模型目录（渠道角标固定显示：本地）</strong>
+                  <div class="muted">需站点/组织管理员权限且 <code>output_modality == "video"</code>。</div>
+                </div>
+              </label>
+            </div>
+          </div>
+          <div class="drawer-box">
+            <h3>三方冒烟验证锁与服务端显存预算推导</h3>
+            <div id="pub-smoke-receipt"
+                 class="smoke-receipt num"></div>
+          </div>
+          <div class="drawer-box">
+            <h3>模型依赖静态锁（canonical_model_lock_v1 · 零付费模型）</h3>
+            <ul id="pub-deps-list"
+                class="spec-list"></ul>
+          </div>
+          <p id="publish-message"
+             class="dialog-message"
+             role="alert"></p>
+        </div>
+        <div class="drawer-footer">
+          <span class="muted num">目标存储：不可变版本快照 + published_api 模型引用锁</span>
+          <div class="actions">
+            <button id="publish-cancel"
+                    class="btn"
+                    type="button">取消</button>
+            <button id="publish-submit"
+                    class="btn primary"
+                    type="submit">锁定并发布不可变版</button>
+          </div>
+        </div>
+      </form>
     </dialog>
   </main>
   <script type="module"

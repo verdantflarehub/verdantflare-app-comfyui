@@ -1,21 +1,40 @@
-"""Deliberately narrow native SDXL workflow policy, with no implicit models."""
+"""Controlled workflow policy supporting both legacy narrow SDXL locks and D4-A general DAG validation."""
 from copy import deepcopy
 import hashlib
 from pathlib import Path
 import re
 
+from .api_compiler import (
+    MEDIA_INPUT_SLOTS,
+    OUTPUT_NODE_MODALITIES,
+    TASK_SCOPED_INPUT_REL_RE,
+    compute_canonical_prompt_sha256,
+    compute_model_dependencies_sha256,
+    resolve_canonical_model_locks,
+    rewrite_prompt_model_views,
+    strip_ui_nodes_from_prompt,
+    validate_d4a_api_prompt,
+)
+from .artifact_bridge import ARTIFACT_UUID_RE
 from .protocol import Error
 from .task_store import canonical
 
 
 class WorkflowPolicy:
-    def __init__(self, model=None):
+    def __init__(self, model=None, *, model_cache=None):
         self.model = deepcopy(model)
+        self.model_cache = model_cache
         if model is not None:
-            if set(model) != {'model_id', 'filename', 'path', 'sha256', 'size'}:
+            allowed_keys = {'model_id', 'filename', 'path', 'sha256', 'size', 'category'}
+            required_keys = {'model_id', 'filename', 'path', 'sha256', 'size'}
+            if not required_keys.issubset(model) or set(model) - allowed_keys:
                 raise ValueError('invalid model lock')
             if not all(isinstance(model[k], str) for k in ('model_id', 'filename', 'path', 'sha256')):
                 raise ValueError('invalid model lock')
+            category = model.get('category', 'CKPT')
+            if category not in {'CKPT', 'UNET', 'CLIP', 'VAE', 'LORA', 'CNET', 'UPSC', 'IPAD'}:
+                raise ValueError('invalid model lock')
+            self.model['category'] = category
             if (not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', model['model_id'])
                     or not re.fullmatch(r'[a-zA-Z0-9_-]+\.safetensors', model['filename'])
                     or not re.fullmatch(r'[a-f0-9]{64}', model['sha256'])
@@ -29,18 +48,80 @@ class WorkflowPolicy:
                     raise ValueError('model hash mismatch')
             # Deployment must bind this verified file read-only at the native checkpoint path.
 
+    def bind_model_cache(self, model_cache):
+        if self.model is None and model_cache is not None:
+            self.model_cache = model_cache
+
     @property
     def ready(self):
-        return self.model is not None
+        return self.model is not None or self.model_cache is not None
+
+    def _validate_d4a_snapshot(self, snapshot):
+        if not isinstance(snapshot, dict) or set(snapshot) != {'workflow', 'prompt', 'dependencies', 'inputs'}:
+            raise Error('INVALID_SNAPSHOT')
+        canonical(snapshot)
+        if not isinstance(snapshot['workflow'], dict) or not isinstance(snapshot['inputs'], list):
+            raise Error('INVALID_SNAPSHOT')
+        cleaned_prompt = strip_ui_nodes_from_prompt(snapshot['prompt'])
+        dag_meta = validate_d4a_api_prompt(cleaned_prompt, error_code='WORKFLOW_NOT_ALLOWED')
+        canonical_locks = resolve_canonical_model_locks(
+            cleaned_prompt,
+            snapshot['dependencies'],
+            model_cache=self.model_cache,
+            strict_client_match=True,
+            error_code='DEPENDENCY_MISMATCH',
+        )
+
+        seen_slots: set[tuple[str, str]] = set()
+        expected_media_slots: set[tuple[str, str]] = set()
+        for nid, node in cleaned_prompt.items():
+            for mkey in MEDIA_INPUT_SLOTS.get(node['class_type'], {}):
+                expected_media_slots.add((nid, mkey))
+
+        for item in snapshot['inputs']:
+            if not isinstance(item, dict) or set(item) != {'node_id', 'input_key', 'artifact_id'}:
+                raise Error('INVALID_PARAMETERS', 400)
+            nid = item['node_id']
+            ikey = item['input_key']
+            aid = item['artifact_id']
+            if (not isinstance(nid, str) or nid not in cleaned_prompt
+                    or not isinstance(ikey, str)
+                    or not isinstance(aid, str) or not ARTIFACT_UUID_RE.fullmatch(aid)):
+                raise Error('INVALID_PARAMETERS', 400)
+            if (nid, ikey) in seen_slots:
+                raise Error('INVALID_PARAMETERS', 400, details={'reason': 'DUPLICATE_INPUT_BINDING'})
+            if (nid, ikey) not in expected_media_slots:
+                raise Error('INVALID_PARAMETERS', 400, details={'reason': 'INVALID_MEDIA_INPUT_SLOT'})
+            seen_slots.add((nid, ikey))
+
+        if seen_slots != expected_media_slots:
+            raise Error('INVALID_PARAMETERS', 400, details={'reason': 'UNBOUND_MEDIA_LOADER_SLOT'})
+
+        return {
+            'valid': True,
+            'policy': 'd4a-v1',
+            'output_modality': dag_meta['output_modality'],
+            'reproducibility_level': dag_meta['reproducibility_level'],
+            'output_node_ids': dag_meta['output_node_ids'],
+            'model_dependencies': canonical_locks,
+            'prompt_sha256': compute_canonical_prompt_sha256(cleaned_prompt),
+            'model_dependencies_sha256': compute_model_dependencies_sha256(canonical_locks),
+        }
 
     def validate(self, snapshot):
         if not self.ready:
             raise Error('DEPENDENCIES_NOT_READY', 409)
+        if self.model is None:
+            return self._validate_d4a_snapshot(snapshot)
         if not isinstance(snapshot, dict) or set(snapshot) != {'workflow', 'prompt', 'dependencies', 'inputs'}:
             raise Error('INVALID_SNAPSHOT')
         canonical(snapshot)
+        deps = snapshot['dependencies']
+        expected_base = {k: self.model[k] for k in ('model_id', 'sha256', 'size')}
+        expected_with_cat = {**expected_base, 'category': self.model.get('category', 'CKPT')}
         if (not isinstance(snapshot['workflow'], dict) or snapshot['inputs'] != []
-                or snapshot['dependencies'] != [{k: self.model[k] for k in ('model_id', 'sha256', 'size')}]):
+                or not isinstance(deps, list) or len(deps) != 1
+                or deps[0] not in (expected_base, expected_with_cat)):
             raise Error('DEPENDENCY_MISMATCH')
         prompt = snapshot['prompt']
         types = ['CheckpointLoaderSimple', 'CLIPTextEncode', 'CLIPTextEncode', 'EmptyLatentImage',
@@ -81,8 +162,23 @@ class WorkflowPolicy:
             raise Error('INVALID_PARAMETERS')
         return {'valid': True, 'policy': 'sdxl-native-v1', 'model_id': self.model['model_id']}
 
-    def compile(self, task):
-        self.validate(task['snapshot'])
+    def compile(self, task, *, materialized_inputs=None):
+        info = self.validate(task['snapshot'])
+        if self.model is None:
+            cleaned = strip_ui_nodes_from_prompt(task['snapshot']['prompt'])
+            rewritten = rewrite_prompt_model_views(cleaned, info['model_dependencies'])
+            mat_map = materialized_inputs or task.get('materialized_inputs') or {}
+            for (nid, ikey), rel_path in mat_map.items():
+                if nid in rewritten and ikey in rewritten[nid]['inputs']:
+                    rewritten[nid]['inputs'][ikey] = rel_path
+            for nid, node in rewritten.items():
+                for mkey in MEDIA_INPUT_SLOTS.get(node['class_type'], {}):
+                    mval = node['inputs'].get(mkey)
+                    if not isinstance(mval, str) or not TASK_SCOPED_INPUT_REL_RE.fullmatch(mval):
+                        raise Error('INVALID_PARAMETERS', 400, details={'reason': 'UNMATERIALIZED_MEDIA_SLOT', 'node_id': nid, 'input_key': mkey})
+                if node['class_type'] in OUTPUT_NODE_MODALITIES:
+                    node['inputs']['filename_prefix'] = f"vf/{task['id']}/out_{nid}"
+            return rewritten
         prompt = deepcopy(task['snapshot']['prompt'])
         prompt['1']['inputs']['ckpt_name'] = self.model['filename']
         prompt['7']['inputs']['filename_prefix'] = 'vf/' + task['id'] + '/output'

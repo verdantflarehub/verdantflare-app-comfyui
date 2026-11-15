@@ -33,12 +33,16 @@ class Editing:
 
     @staticmethod
     def view(row):
-        return {'session_id': row['id'], 'instance_id': row['instance_id'], 'project_id': row['project_id'],
-                'base_revision_id': row['revision_id'], 'generation': row['generation'], 'mode': row['mode'],
-                'expires_at': row['expires'], 'closed': bool(row['closed'])}
+        out = {'session_id': row['id'], 'instance_id': row['instance_id'], 'project_id': row['project_id'],
+               'base_revision_id': row['revision_id'], 'generation': row['generation'], 'mode': row['mode'],
+               'expires_at': row['expires'], 'closed': bool(row['closed'])}
+        if 'closed_reason' in row.keys() and row['closed_reason'] is not None:
+            out['closed_reason'] = row['closed_reason']
+        return out
 
-    def session(self, db, principal, instance_id, project_id, session_id, *, live=True, write=False):
-        instance = self.store.instance(db, principal, instance_id)
+    def session(self, db, principal, instance_id, project_id, session_id, *, live=True, write=False, allow_org_member=False):
+        instance = (self.store.instance_in_org(db, principal, instance_id)
+                    if allow_org_member else self.store.instance(db, principal, instance_id))
         row = db.execute('''SELECT * FROM edit_sessions WHERE id=? AND instance_id=?
             AND organization_id=? AND owner_id=? AND project_id=?''',
             (session_id, instance_id, principal.organization_id, principal.user_id, project_id)).fetchone()
@@ -46,37 +50,47 @@ class Editing:
             raise TaskError('NOT_FOUND')
         if live:
             self.store.instance_available(db, instance_id)
+            if write:
+                self.store.check_fence_admits_work(db, instance_id)
             now = self.clock()
-            if row['closed'] or now >= row['expires'] or now < row['last_seen']:
-                db.execute('UPDATE edit_sessions SET closed=1 WHERE id=?', (session_id,))
-                raise LeaseExpired('SESSION_EXPIRED')
+            if row['closed'] and 'closed_reason' in row.keys() and row['closed_reason'] == 'closed_by_restart':
+                raise TaskError('SESSION_CLOSED_BY_RESTART')
             if instance['generation'] != row['generation']:
                 raise TaskError('STALE_GENERATION')
+            if row['closed'] or now >= row['expires'] or now < row['last_seen']:
+                if not row['closed']:
+                    db.execute('UPDATE edit_sessions SET closed=1 WHERE id=?', (session_id,))
+                if 'closed_reason' in row.keys() and row['closed_reason'] == 'closed_by_restart':
+                    raise TaskError('SESSION_CLOSED_BY_RESTART')
+                raise LeaseExpired('SESSION_EXPIRED')
             if write and row['mode'] != 'edit':
                 raise TaskError('EDIT_REQUIRED')
             if (write or row['mode'] == 'edit') and instance['draining']:
                 raise TaskError('INSTANCE_DRAINING')
         return row
 
-    def info(self, principal, instance_id, project_id, session_id, *, live=True):
+    def info(self, principal, instance_id, project_id, session_id, *, live=True, allow_org_member=False):
         with self.transaction() as db:
-            return self.view(self.session(db, principal, instance_id, project_id, session_id, live=live))
+            return self.view(self.session(db, principal, instance_id, project_id, session_id, live=live, allow_org_member=allow_org_member))
 
-    def open(self, principal, instance_id, project_id, revision_id, mode, key):
+    def open(self, principal, instance_id, project_id, revision_id, mode, key, *, allow_org_member=False):
         with self.transaction() as db:
             now = self.clock()
-            instance = self.store.instance(db, principal, instance_id)
+            instance = (self.store.instance_in_org(db, principal, instance_id)
+                        if allow_org_member else self.store.instance(db, principal, instance_id))
             self.store.instance_available(db, instance_id)
             # Expiry must not revive an old writer after a clock rollback and
             # another window has acquired the lease.
-            db.execute('UPDATE edit_sessions SET closed=1 WHERE instance_id=? AND expires<=?', (instance_id, now))
+            db.execute('UPDATE edit_sessions SET closed=1 WHERE instance_id=? AND closed=0 AND expires<=?', (instance_id, now))
             row = db.execute('''SELECT * FROM edit_sessions WHERE instance_id=? AND organization_id=?
                 AND owner_id=? AND project_id=? AND request_key=?''',
                 (instance_id, principal.organization_id, principal.user_id, project_id, key)).fetchone()
             if row:
                 if row['mode'] != mode or row['revision_id'] != revision_id:
                     raise TaskError('IDEMPOTENCY_CONFLICT')
-                return self.view(self.session(db, principal, instance_id, project_id, row['id']))
+                return self.view(self.session(db, principal, instance_id, project_id, row['id'], allow_org_member=allow_org_member))
+            if mode == 'edit':
+                self.store.check_fence_admits_work(db, instance_id)
             if instance['draining']:
                 raise TaskError('INSTANCE_DRAINING')
             active = db.execute('''SELECT * FROM edit_sessions WHERE instance_id=? AND generation=?
@@ -101,32 +115,51 @@ class Editing:
                  instance['generation'], mode, key, now + TTL, now))
             return self.view(db.execute('SELECT * FROM edit_sessions WHERE id=?', (sid,)).fetchone())
 
-    def renew(self, principal, instance_id, project_id, session_id):
+    def renew(self, principal, instance_id, project_id, session_id, *, allow_org_member=False):
         with self.transaction() as db:
-            self.session(db, principal, instance_id, project_id, session_id)
+            self.session(db, principal, instance_id, project_id, session_id, allow_org_member=allow_org_member)
             now = self.clock()
             db.execute('UPDATE edit_sessions SET expires=?,last_seen=? WHERE id=?', (now + TTL, now, session_id))
             return self.view(db.execute('SELECT * FROM edit_sessions WHERE id=?', (session_id,)).fetchone())
 
-    def close(self, principal, instance_id, project_id, session_id):
+    def close(self, principal, instance_id, project_id, session_id, *, allow_org_member=False):
         with self.transaction() as db:
-            self.session(db, principal, instance_id, project_id, session_id, live=False)
+            self.session(db, principal, instance_id, project_id, session_id, live=False, allow_org_member=allow_org_member)
             db.execute('UPDATE edit_sessions SET closed=1 WHERE id=?', (session_id,))
             return self.view(db.execute('SELECT * FROM edit_sessions WHERE id=?', (session_id,)).fetchone())
 
-    def get(self, principal, instance_id, project_id, session_id):
+    def get(self, principal, instance_id, project_id, session_id, *, allow_org_member=False):
         with self.transaction() as db:
-            self.session(db, principal, instance_id, project_id, session_id)
+            self.session(db, principal, instance_id, project_id, session_id, allow_org_member=allow_org_member)
             row = db.execute('SELECT * FROM drafts WHERE instance_id=? AND project_id=?', (instance_id, project_id)).fetchone()
             return {'base_revision_id': row['revision_id'], 'version': row['version'], 'sha256': row['sha256'],
                     'snapshot': json.loads(row['snapshot']) if row['snapshot'] else None, 'saved_to_project': False}
 
-    def update(self, principal, instance_id, project_id, session_id, expected_version, key, snapshot):
+    def verify_draft_in_tx(
+        self,
+        db,
+        principal,
+        instance_id,
+        project_id,
+        session_id,
+        *,
+        expected_version: int,
+        expected_sha256: str | None = None,
+        allow_org_member: bool = False,
+    ) -> None:
+        self.session(db, principal, instance_id, project_id, session_id, live=True, write=False, allow_org_member=allow_org_member)
+        row = db.execute('SELECT version, sha256, snapshot FROM drafts WHERE instance_id=? AND project_id=?', (instance_id, project_id)).fetchone()
+        if not row or row['snapshot'] is None:
+            raise TaskError('SMOKE_VERIFICATION_MISMATCH')
+        if row['version'] != expected_version or (expected_sha256 is not None and row['sha256'] != expected_sha256):
+            raise TaskError('DRAFT_VERSION_CONFLICT')
+
+    def update(self, principal, instance_id, project_id, session_id, expected_version, key, snapshot, *, allow_org_member=False):
         encoded = canonical(snapshot)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         fingerprint = hashlib.sha256(canonical([expected_version, snapshot]).encode()).hexdigest()
         with self.transaction() as db:
-            self.session(db, principal, instance_id, project_id, session_id, write=True)
+            self.session(db, principal, instance_id, project_id, session_id, write=True, allow_org_member=allow_org_member)
             previous = db.execute('SELECT * FROM draft_writes WHERE session_id=? AND request_key=?', (session_id, key)).fetchone()
             if previous:
                 if previous['fingerprint'] != fingerprint:

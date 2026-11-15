@@ -1,0 +1,13 @@
+**
+!Dockerfile.worker.s6fault
+!requirements-runtime.lock
+!upstream.lock.json
+!UPSTREAM.md
+!LICENSE
+!worker/
+!worker/**
+!fault_inject/
+!fault_inject/comfy_s6_stub/
+!fault_inject/comfy_s6_stub/**
+**/__pycache__
+**/*.pyc

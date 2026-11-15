@@ -9,6 +9,8 @@ import aiohttp
 
 from .protocol import Error, decode, encode
 
+ENGINE_STATES = frozenset({'zero_vram_standby', 'warming', 'ready', 'evicting'})
+
 
 def static_asset(frontend, suffix):
     if (not suffix or len(suffix) > 512 or re.search(r'[%\\?#\x00-\x20]', suffix)
@@ -46,9 +48,13 @@ def action(editor, principal, name, body):
     if name == 'poll':
         row = editor.check(principal, body['session_id'])
         events = []
+        observed_engine = [None]
         size = len(encode({'events': []}))
         def collect(value):
             nonlocal size
+            if isinstance(value, dict) and value.get('kind') == 'engine_state':
+                observed_engine[0] = value['engine_state']
+                return
             size += len(encode(value)) + (1 if events else 0)
             if len(events) >= 128 or size > 65536:
                 raise Error('EDITOR_EVENTS_TOO_LARGE', 503)
@@ -59,7 +65,10 @@ def action(editor, principal, name, body):
             raise Error('EDITOR_DISCONNECTED', 503) from None
         # Do not publish data after the lease expired or changed during polling.
         editor.check(principal, body['session_id'])
-        return {'events': events}
+        response = {'events': events}
+        if observed_engine[0] is not None:
+            response['engine_state'] = observed_engine[0]
+        return response
     return editor.check(principal, body['session_id'])
 
 
@@ -96,6 +105,12 @@ async def stream_events(editor, row, emit, *, duration=15):
                     elif isinstance(value, dict) and value.get('type') == 'feature_flags':
                         # Capabilities only; native task events and paths are not a base-editor API.
                         emit({'kind': 'socket', 'payload': {'type': 'feature_flags', 'data': {}}})
+                    elif isinstance(value, dict) and value.get('type') == 'vf_engine_state':
+                        data = value.get('data')
+                        state = data.get('engine_state') if isinstance(data, dict) else None
+                        if state not in ENGINE_STATES or set(data) != {'engine_state'}:
+                            raise Error('INVALID_EDITOR_EVENTS', 503)
+                        emit({'kind': 'engine_state', 'engine_state': state})
                 elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR}:
                     raise Error('EDITOR_DISCONNECTED', 503)
 

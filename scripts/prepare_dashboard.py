@@ -48,7 +48,7 @@ def build(source, output, version):
     declaration = {'schemaVersion': 1, 'appId': 'comfyui', 'appVersion': version, 'dashboard': {
         'entryRef': 'dashboard/index.html', 'artifactDigest': 'sha256:' + hashlib.sha256(index_bytes).hexdigest(),
         'adapter': 'wujie', 'sdkMajor': 1, 'minimumSdkVersion': '1.2.0',
-        'requiredCapabilities': ['app.request', 'instances.open', 'files.select', 'files.read'], 'optionalCapabilities': [],
+        'requiredCapabilities': ['app.request', 'instances.open', 'files.select', 'files.read', 'navigation.request'], 'optionalCapabilities': [],
         'appApiPolicyRef': 'comfyui-management-v1', 'keepAlive': True,
     }}
     output.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,12 @@
 {
-  "generated_from": "verdantflare-design/docs/design/app/comfyui/mcp-tools.dev.json",
-  "source_sha256": "9628f1fab3364ab8d71a29dadc8c9b050d815ab605f7f5dc7637a5d73870954e",
-  "contract_version": "comfyui-dev-2",
+  "generated_from": "verdantflare-design/docs/design/app/comfyui/mcp-tools.v1.json",
+  "source_sha256": "a1e6e1e6d0b71cce920f157d5311a698263deb4b83bdb83e1774d736f34219ba",
+  "contract_version": "comfyui-v1",
+  "status": "draft-pending-cp1",
   "tools": [
     {
       "name": "instance.capabilities",
-      "description": "Read this instance development capabilities and dependency readiness.",
+      "description": "Read this instance contract capabilities, profile metadata, engine residency state, and dependency readiness.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -21,7 +22,7 @@
     },
     {
       "name": "workflow.validate",
-      "description": "Validate a bounded inline snapshot against the fixed native workflow policy.",
+      "description": "Validate an inline workflow snapshot, node allowlist, Artifact input bindings, and locked model dependencies.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -50,7 +51,32 @@
               "prompt": {
                 "type": "object",
                 "minProperties": 1,
-                "maxProperties": 64
+                "maxProperties": 256,
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^[1-9][0-9]{0,5}$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "class_type",
+                      "inputs"
+                    ],
+                    "properties": {
+                      "class_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+                      },
+                      "inputs": {
+                        "type": "object",
+                        "maxProperties": 64
+                      },
+                      "_meta": {
+                        "type": "object",
+                        "maxProperties": 16
+                      }
+                    }
+                  }
+                }
               },
               "dependencies": {
                 "type": "array",
@@ -60,14 +86,30 @@
                   "additionalProperties": false,
                   "required": [
                     "model_id",
+                    "category",
                     "sha256",
                     "size"
                   ],
                   "properties": {
+                    "catalog_code": {
+                      "type": "string",
+                      "pattern": "^MDL-(CKPT|UNET|CLIP|VAE|LORA|CNET|UPSC|IPAD)-[A-Z0-9]{2,24}-[0-9]{3}$"
+                    },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1,
-                      "maxLength": 80
+                      "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+                    },
+                    "category": {
+                      "enum": [
+                        "CKPT",
+                        "UNET",
+                        "CLIP",
+                        "VAE",
+                        "LORA",
+                        "CNET",
+                        "UPSC",
+                        "IPAD"
+                      ]
                     },
                     "sha256": {
                       "type": "string",
@@ -75,14 +117,38 @@
                     },
                     "size": {
                       "type": "integer",
-                      "minimum": 1
+                      "minimum": 1,
+                      "maximum": 26843545600
                     }
                   }
                 }
               },
               "inputs": {
                 "type": "array",
-                "maxItems": 0
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "node_id",
+                    "input_key",
+                    "artifact_id"
+                  ],
+                  "properties": {
+                    "node_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,5}$"
+                    },
+                    "input_key": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  }
+                }
               }
             }
           }
@@ -97,7 +163,7 @@
     },
     {
       "name": "task.submit",
-      "description": "Admit an immutable inline workflow snapshot. This development slice does not yet load workflow_ref.",
+      "description": "Admit an immutable inline workflow snapshot on this interactive instance with automatic Artifact input materialization and output collection. When executed as a publish smoke run, pass session_id and expected_draft_version so the server atomically binds and verifies the session draft against snapshot.prompt.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -106,10 +172,27 @@
           "idempotency_key",
           "snapshot"
         ],
+        "dependentRequired": {
+          "session_id": [
+            "expected_draft_version"
+          ],
+          "expected_draft_version": [
+            "session_id"
+          ]
+        },
         "properties": {
           "project_id": {
             "type": "string",
             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "expected_draft_version": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
           },
           "idempotency_key": {
             "type": "string",
@@ -133,7 +216,32 @@
               "prompt": {
                 "type": "object",
                 "minProperties": 1,
-                "maxProperties": 64
+                "maxProperties": 256,
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^[1-9][0-9]{0,5}$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "class_type",
+                      "inputs"
+                    ],
+                    "properties": {
+                      "class_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+                      },
+                      "inputs": {
+                        "type": "object",
+                        "maxProperties": 64
+                      },
+                      "_meta": {
+                        "type": "object",
+                        "maxProperties": 16
+                      }
+                    }
+                  }
+                }
               },
               "dependencies": {
                 "type": "array",
@@ -143,14 +251,30 @@
                   "additionalProperties": false,
                   "required": [
                     "model_id",
+                    "category",
                     "sha256",
                     "size"
                   ],
                   "properties": {
+                    "catalog_code": {
+                      "type": "string",
+                      "pattern": "^MDL-(CKPT|UNET|CLIP|VAE|LORA|CNET|UPSC|IPAD)-[A-Z0-9]{2,24}-[0-9]{3}$"
+                    },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1,
-                      "maxLength": 80
+                      "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+                    },
+                    "category": {
+                      "enum": [
+                        "CKPT",
+                        "UNET",
+                        "CLIP",
+                        "VAE",
+                        "LORA",
+                        "CNET",
+                        "UPSC",
+                        "IPAD"
+                      ]
                     },
                     "sha256": {
                       "type": "string",
@@ -158,14 +282,38 @@
                     },
                     "size": {
                       "type": "integer",
-                      "minimum": 1
+                      "minimum": 1,
+                      "maximum": 26843545600
                     }
                   }
                 }
               },
               "inputs": {
                 "type": "array",
-                "maxItems": 0
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "node_id",
+                    "input_key",
+                    "artifact_id"
+                  ],
+                  "properties": {
+                    "node_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,5}$"
+                    },
+                    "input_key": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  }
+                }
               }
             }
           }
@@ -180,7 +328,7 @@
     },
     {
       "name": "task.get",
-      "description": "Read this principal and project task status. No raw native history is returned.",
+      "description": "Read authorized task status, GPU lease summary, resolved seeds, and archived Artifact output refs.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -195,7 +343,7 @@
           },
           "task_id": {
             "type": "string",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
           }
         }
       },
@@ -208,7 +356,7 @@
     },
     {
       "name": "task.cancel",
-      "description": "Request cancellation of exactly one authorized task.",
+      "description": "Request targeted cancellation of a single authorized task without disrupting unrelated queue items.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -224,7 +372,7 @@
           },
           "task_id": {
             "type": "string",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
           },
           "idempotency_key": {
             "type": "string",
@@ -415,7 +563,33 @@
               },
               "prompt": {
                 "type": "object",
-                "maxProperties": 64
+                "minProperties": 0,
+                "maxProperties": 256,
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^[1-9][0-9]{0,5}$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "class_type",
+                      "inputs"
+                    ],
+                    "properties": {
+                      "class_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+                      },
+                      "inputs": {
+                        "type": "object",
+                        "maxProperties": 64
+                      },
+                      "_meta": {
+                        "type": "object",
+                        "maxProperties": 16
+                      }
+                    }
+                  }
+                }
               },
               "dependencies": {
                 "type": "array",
@@ -425,14 +599,30 @@
                   "additionalProperties": false,
                   "required": [
                     "model_id",
+                    "category",
                     "sha256",
                     "size"
                   ],
                   "properties": {
+                    "catalog_code": {
+                      "type": "string",
+                      "pattern": "^MDL-(CKPT|UNET|CLIP|VAE|LORA|CNET|UPSC|IPAD)-[A-Z0-9]{2,24}-[0-9]{3}$"
+                    },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1,
-                      "maxLength": 80
+                      "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+                    },
+                    "category": {
+                      "enum": [
+                        "CKPT",
+                        "UNET",
+                        "CLIP",
+                        "VAE",
+                        "LORA",
+                        "CNET",
+                        "UPSC",
+                        "IPAD"
+                      ]
                     },
                     "sha256": {
                       "type": "string",
@@ -440,15 +630,1365 @@
                     },
                     "size": {
                       "type": "integer",
-                      "minimum": 1
+                      "minimum": 1,
+                      "maximum": 26843545600
                     }
                   }
                 }
               },
               "inputs": {
                 "type": "array",
-                "maxItems": 0
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "node_id",
+                    "input_key",
+                    "artifact_id"
+                  ],
+                  "properties": {
+                    "node_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,5}$"
+                    },
+                    "input_key": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                    }
+                  }
+                }
               }
+            }
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diag.runtime_spec",
+      "description": "Read sanitized effective worker runtime specification, mounts, custom node lock digest, and GPU residency state (safe equivalent to kubectl get/describe).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diag.logs",
+      "description": "Read sanitized, project/task-scoped ring-buffer log lines from comfyui-supervisor and engine subprocess with boot_id cursor fencing. Lines tagged with any other project_id != req.project_id are unconditionally excluded for all callers; untagged instance lifecycle lines (project_id == null) are appended only when the caller holds instance owner or organization admin permission (indicated via response scope_included). First un-cursored tail read omits since_seq; incremental reads passing since_seq MUST also pass boot_id.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id"
+        ],
+        "dependentRequired": {
+          "since_seq": [
+            "boot_id"
+          ]
+        },
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "stream": {
+            "enum": [
+              "all",
+              "supervisor",
+              "engine"
+            ],
+            "default": "all"
+          },
+          "since_seq": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Exclusive sequence cursor; when specified, boot_id is mandatory."
+          },
+          "tail_lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 100
+          },
+          "boot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "task_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diag.execution_trace",
+      "description": "Read structured per-node execution timings, failed node input contract, and sanitized Python traceback for a specific task.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "task_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "task_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "diag.object_info",
+      "description": "Query paginated and filtered ComfyUI node input/output definitions cached by the instance supervisor.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "category_prefix": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96,
+            "pattern": "^[a-zA-Z0-9_./ -]+$"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-zA-Z0-9_.-]+$"
+          },
+          "node_types": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_.-]{1,96}$"
+            }
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "repair.reload_models",
+      "description": "Refresh the worker read-only model directory index (/models:ro) after a new model reaches ready state without interrupting editing leases.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "idempotency_key"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "expected_model_index_version": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "repair.free_vram",
+      "description": "Trigger two-step soft VRAM unload on an S2 Idle-Evictable instance (zero active/dispatching/collecting/reconciling tasks and human_protected=false) while preserving boot_id and drafts.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "idempotency_key"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "repair.restart_worker",
+      "description": "Perform controlled single-instance Runtime stop-barrier and generation+1 rotation after full NVML + cgroup zero-PID reclamation proof while preserving /workspace drafts.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "idempotency_key",
+          "reason"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 256
+          },
+          "force_after_drain_timeout_seconds": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 120,
+            "default": 15
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "model.list",
+      "description": "List standard catalog models and Station local model cache inventory across 8 categories and 7 lifecycle states (6 provisioning states + evicting).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "category": {
+            "enum": [
+              "CKPT",
+              "UNET",
+              "CLIP",
+              "VAE",
+              "LORA",
+              "CNET",
+              "UPSC",
+              "IPAD"
+            ]
+          },
+          "status": {
+            "enum": [
+              "not_installed",
+              "queued",
+              "downloading",
+              "verifying_sha256",
+              "ready",
+              "failed",
+              "evicting"
+            ]
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[a-zA-Z0-9_.-]+$"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "model.status",
+      "description": "Read real-byte 7-state lifecycle progress (not_installed/queued/downloading/verifying_sha256/ready/failed/evicting), SHA-256 verification status, and relative /models:ro view name without host path leakage.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "model_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "model.ensure",
+      "description": "Trigger Station singleflight CAS download and .safetensors header + SHA-256 verification into /data/models/comfyui/ under open-source, paid_access == false, and quota gates. Passing expected_sha256 that differs from the catalog entry fails synchronously with 409 MODEL_CATALOG_SHA256_MISMATCH before queuing any download.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "idempotency_key",
+          "model_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "model_id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+          },
+          "catalog_code": {
+            "type": "string",
+            "pattern": "^MDL-(CKPT|UNET|CLIP|VAE|LORA|CNET|UPSC|IPAD)-[A-Z0-9]{2,24}-[0-9]{3}$"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "api.extract_spec",
+      "description": "Extract a candidate WorkflowAPISpec v1 parameter schema, model_dependencies lock, and VRAM estimate from the current session draft.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "session_id",
+          "endpoint_slug"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "endpoint_slug": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{2,62}[a-z0-9]$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "api.publish",
+      "description": "Freeze a session draft, smoke-verified DAG template, and WorkflowAPISpec v1 into an immutable versioned API endpoint with server-derived VRAM budget and model pins.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "session_id",
+          "expected_draft_version",
+          "idempotency_key",
+          "smoke_task_id",
+          "spec"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "smoke_task_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "mount_channel": {
+            "description": "none requires project publish permission; image or video projects the endpoint into organization-wide Media MCP catalog, MUST equal spec.output_modality, and requires Organization Admin / Station Admin authorization.",
+            "enum": [
+              "none",
+              "image",
+              "video"
+            ],
+            "default": "none"
+          },
+          "spec": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema_version",
+              "endpoint_slug",
+              "version",
+              "display_name",
+              "output_modality",
+              "reproducibility_level",
+              "exposed_inputs",
+              "output_node_ids",
+              "seed_policy",
+              "api_prompt",
+              "model_dependencies"
+            ],
+            "properties": {
+              "schema_version": {
+                "const": "workflow-api-spec-v1"
+              },
+              "endpoint_slug": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{2,62}[a-z0-9]$"
+              },
+              "version": {
+                "type": "string",
+                "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 80
+              },
+              "output_modality": {
+                "enum": [
+                  "image",
+                  "video"
+                ]
+              },
+              "reproducibility_level": {
+                "enum": [
+                  "strict",
+                  "seed_and_env_locked"
+                ]
+              },
+              "requested_vram_floor_mib": {
+                "type": "integer",
+                "minimum": 1024,
+                "maximum": 29696
+              },
+              "exposed_inputs": {
+                "description": "Structural and conditional type envelope; server publish compiler additionally enforces strict Python int AST tokens (rejecting 1.0), minimum <= maximum, min_length <= max_length, default_value within bounds/enum_values, unique name/(node_id,input_key), and protected slot bans.",
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "param_type",
+                    "node_id",
+                    "input_key",
+                    "required"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,62}$"
+                    },
+                    "param_type": {
+                      "enum": [
+                        "string",
+                        "integer",
+                        "number",
+                        "boolean",
+                        "enum",
+                        "artifact_image",
+                        "artifact_mask",
+                        "artifact_video"
+                      ]
+                    },
+                    "node_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,5}$"
+                    },
+                    "input_key": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$"
+                    },
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "default_value": {
+                      "type": [
+                        "string",
+                        "integer",
+                        "number",
+                        "boolean"
+                      ]
+                    },
+                    "minimum": {
+                      "type": "number"
+                    },
+                    "maximum": {
+                      "type": "number"
+                    },
+                    "min_length": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16384
+                    },
+                    "max_length": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 16384
+                    },
+                    "enum_values": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "max_pixels": {
+                      "description": "Mandatory upper pixel envelope (width * height) for artifact_image, artifact_mask, and artifact_video inputs so input media resolution cannot bypass server-derived VRAM budgets.",
+                      "type": "integer",
+                      "minimum": 4096,
+                      "maximum": 16777216
+                    },
+                    "max_frames": {
+                      "description": "Mandatory upper frame count envelope for artifact_video inputs.",
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1024
+                    }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "enum"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "enum_values"
+                        ],
+                        "properties": {
+                          "default_value": {
+                            "type": "string"
+                          }
+                        },
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "minimum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "maximum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_pixels"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "integer"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "minimum": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "maximum": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          },
+                          "default_value": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_pixels"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "number"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "default_value": {
+                            "type": "number"
+                          }
+                        },
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_pixels"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "string"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "default_value": {
+                            "type": "string"
+                          }
+                        },
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "minimum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "maximum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_pixels"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "boolean"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "default_value": {
+                            "type": "boolean"
+                          }
+                        },
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "minimum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "maximum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_pixels"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "enum": [
+                              "artifact_image",
+                              "artifact_mask"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "max_pixels"
+                        ],
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "default_value"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "minimum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "maximum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_frames"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": {
+                          "param_type": {
+                            "const": "artifact_video"
+                          }
+                        },
+                        "required": [
+                          "param_type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "max_pixels",
+                          "max_frames"
+                        ],
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "default_value"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "enum_values"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "minimum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "maximum"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "min_length"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "max_length"
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "output_node_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,5}$"
+                }
+              },
+              "seed_policy": {
+                "description": "Server CSPRNG generates random seeds strictly within IEEE-754 safe non-negative integers 0..9007199254740991 (2^53 - 1); caller-supplied seeds, fixed template seeds, and default_value seeds MUST be exact JSON integer tokens within 0..9007199254740991 and are rejected with 400 INVALID_PARAMETERS if out of range (never truncated, modulo-wrapped, or saturation-clamped).",
+                "enum": [
+                  "caller_or_random",
+                  "fixed"
+                ]
+              },
+              "api_prompt": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 256,
+                "additionalProperties": false,
+                "patternProperties": {
+                  "^[1-9][0-9]{0,5}$": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "class_type",
+                      "inputs"
+                    ],
+                    "properties": {
+                      "class_type": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.-]{1,96}$"
+                      },
+                      "inputs": {
+                        "type": "object",
+                        "maxProperties": 64
+                      },
+                      "_meta": {
+                        "type": "object",
+                        "maxProperties": 16
+                      }
+                    }
+                  }
+                }
+              },
+              "model_dependencies": {
+                "description": "Closed 9-field dependency declarations; both task.submit (smoke) and api.publish canonicalize each (model_id, sha256) via Station Model Catalog into canonical_model_lock_v1 sorted JSON before computing model_dependencies_sha256.",
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "catalog_code",
+                    "model_id",
+                    "category",
+                    "filename",
+                    "sha256",
+                    "size_bytes",
+                    "vram_footprint_mib",
+                    "license",
+                    "paid_access"
+                  ],
+                  "properties": {
+                    "catalog_code": {
+                      "type": "string",
+                      "pattern": "^MDL-(CKPT|UNET|CLIP|VAE|LORA|CNET|UPSC|IPAD)-[A-Z0-9]{2,24}-[0-9]{3}$"
+                    },
+                    "model_id": {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+                    },
+                    "category": {
+                      "enum": [
+                        "CKPT",
+                        "UNET",
+                        "CLIP",
+                        "VAE",
+                        "LORA",
+                        "CNET",
+                        "UPSC",
+                        "IPAD"
+                      ]
+                    },
+                    "filename": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9._-]{1,120}\\.safetensors$"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "size_bytes": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 26843545600
+                    },
+                    "vram_footprint_mib": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 29696
+                    },
+                    "license": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9._+-]+$"
+                    },
+                    "paid_access": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "expected_draft_version": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mount_channel": {
+                  "const": "image"
+                }
+              },
+              "required": [
+                "mount_channel"
+              ]
+            },
+            "then": {
+              "properties": {
+                "spec": {
+                  "properties": {
+                    "output_modality": {
+                      "const": "image"
+                    }
+                  },
+                  "required": [
+                    "output_modality"
+                  ]
+                }
+              },
+              "required": [
+                "spec"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "mount_channel": {
+                  "const": "video"
+                }
+              },
+              "required": [
+                "mount_channel"
+              ]
+            },
+            "then": {
+              "properties": {
+                "spec": {
+                  "properties": {
+                    "output_modality": {
+                      "const": "video"
+                    }
+                  },
+                  "required": [
+                    "output_modality"
+                  ]
+                }
+              },
+              "required": [
+                "spec"
+              ]
+            }
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "api.list",
+      "description": "List immutable published workflow API endpoints available to this organization and project.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "output_modality": {
+            "enum": [
+              "image",
+              "video"
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "api.describe",
+      "description": "Read the full parameter contract, seed policy, server-computed VRAM budget, and dependency readiness of a published workflow API version (omitting version deterministically selects the highest SemVer and echoes resolved_version).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "endpoint_slug"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "endpoint_slug": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{2,62}[a-z0-9]$"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "api.invoke",
+      "description": "Invoke an immutable published workflow API endpoint on the headless API Worker pool with strict parameter injection and automatic Artifact output archiving.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_id",
+          "idempotency_key",
+          "endpoint_slug",
+          "version",
+          "params"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 128,
+            "pattern": "^\\S+$"
+          },
+          "endpoint_slug": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{2,62}[a-z0-9]$"
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+          },
+          "params": {
+            "description": "Strict parameter map validated against WorkflowAPISpec.exposed_inputs; integer values must be exact JSON integer tokens within -9007199254740991..9007199254740991 (seed slots 0..9007199254740991).",
+            "type": "object",
+            "maxProperties": 32,
+            "additionalProperties": {
+              "type": [
+                "string",
+                "integer",
+                "number",
+                "boolean"
+              ]
+            },
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_]{0,62}$"
             }
           }
         }

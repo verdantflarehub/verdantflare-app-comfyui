@@ -39,10 +39,14 @@ def prompt_id(value):
 
 
 class Guard:
-    def __init__(self, instance_id, token, resource_binding=None, runtime_binding=None):
+    def __init__(self, instance_id, token, resource_binding=None, runtime_binding=None, *, engine_epoch=None, enforce_epoch=True):
         if not valid_id(instance_id) or not token_valid(token):
             raise ValueError('valid worker identity and internal credential required')
+        if engine_epoch is not None and (type(engine_epoch) is not int or not 1 <= engine_epoch <= 9223372036854775807):
+            raise ValueError('valid engine epoch required')
         self.instance_id, self.token = instance_id, token
+        self.engine_epoch = engine_epoch
+        self.enforce_epoch = bool(enforce_epoch)
         self.boot_id = str(uuid.uuid4())
         self.seen = set()
         self.active_requests, self.uncertain_write = 0, False
@@ -86,7 +90,7 @@ class Guard:
         self.active_requests += 1
         try:
             response = await handler(request)
-            if request.method != 'GET' and response.status >= 500:
+            if request.method != 'GET' and response.status >= 500 and not request.get('vf_pre_dispatch_reject'):
                 self.uncertain_write = True
             return response
         except BaseException:
@@ -165,8 +169,11 @@ class Guard:
         if self.stop_operation_id is not None:
             return self.reject('INSTANCE_STOPPING', 409)
         if request.method == 'GET' and request.path == '/vf/status':
-            return web.json_response({'protocol': 1, 'instance_id': self.instance_id, 'boot_id': self.boot_id,
-                                      'resource_binding': self.resource_binding}, headers={'Cache-Control': 'no-store'})
+            payload = {'protocol': 1, 'instance_id': self.instance_id, 'boot_id': self.boot_id,
+                       'resource_binding': self.resource_binding}
+            if self.engine_epoch is not None:
+                payload['engine_epoch'] = self.engine_epoch
+            return web.json_response(payload, headers={'Cache-Control': 'no-store'})
         editor_headers = request.headers.getall('X-VF-Editor', [])
         if editor_headers and (editor_headers != ['1'] or request.method != 'GET'):
             return self.reject('EDITOR_OPERATION_DENIED', 403)
@@ -175,6 +182,11 @@ class Guard:
                         '/prompt', '/workflow_templates', '/experiment/models', '/api/jobs', '/api/feature_flags', '/ws'}
             if request.path in metadata or re.fullmatch(r'/(models|object_info)/[A-Za-z0-9_.-]{1,96}', request.path):
                 return await self.forward(request, handler)
+        if self.enforce_epoch:
+            epochs = request.headers.getall('X-VF-Engine-Epoch', [])
+            if len(epochs) > 1 or (self.engine_epoch is not None and epochs != [str(self.engine_epoch)]) or (
+                    self.engine_epoch is None and epochs):
+                return self.reject('STALE_ENGINE_EPOCH', 409)
         if request.method == 'GET':
             if request.path == '/queue' or request.path.startswith('/history/') and prompt_id(request.path[9:]):
                 return await self.forward(request, handler)

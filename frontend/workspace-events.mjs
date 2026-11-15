@@ -1,9 +1,17 @@
 // The editor's status channel has its own lifetime, independent of the worker.
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const keys = (value, fields) => object(value) && Object.keys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
+const engineStates = new Set(['zero_vram_standby', 'warming', 'ready', 'evicting']);
+
+export function readEngineState(batch) {
+  if (!object(batch) || !Object.hasOwn(batch, 'engine_state')) return null;
+  if (!engineStates.has(batch.engine_state)) throw Error('ComfyUI 事件数据无效。');
+  return batch.engine_state;
+}
 
 export function readStatusBatch(batch, sessionId) {
-  if (!keys(batch, ['events']) || !Array.isArray(batch.events) || batch.events.length > 128
+  const validShape = keys(batch, ['events']) || (keys(batch, ['events', 'engine_state']) && engineStates.has(batch.engine_state));
+  if (!validShape || !Array.isArray(batch.events) || batch.events.length > 128
       || new TextEncoder().encode(JSON.stringify(batch)).length > 65536) throw Error('ComfyUI 事件数据无效。');
   const payloads = [];
   for (const event of batch.events) {
@@ -19,10 +27,11 @@ export function readStatusBatch(batch, sessionId) {
     }
     payloads.push(payload);
   }
+  Object.defineProperty(payloads, 'engineState', { value: readEngineState(batch), enumerable: false });
   return payloads;
 }
 
-export function subscribeStatus({ request, sessionId, emit, onError, visibility = document }) {
+export function subscribeStatus({ request, sessionId, emit, onEngineState, onError, visibility = document }) {
   let disposed = false, current, timer;
   const active = () => !disposed && !visibility.hidden;
   async function poll() {
@@ -35,6 +44,9 @@ export function subscribeStatus({ request, sessionId, emit, onError, visibility 
       const batch = await response.json();
       if (current !== attempt || !active()) return;
       const payloads = readStatusBatch(batch, sessionId);
+      if (payloads.engineState !== null && typeof onEngineState === 'function') {
+        onEngineState(payloads.engineState);
+      }
       for (const payload of payloads) {
         if (current !== attempt || !active()) return;
         emit(payload);

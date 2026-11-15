@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readStatusBatch, subscribeStatus } from '../frontend/workspace-events.mjs';
+import { readEngineState, readStatusBatch, subscribeStatus } from '../frontend/workspace-events.mjs';
 
 const status = (remaining = 2, sid = 'lease-A') => ({kind:'socket', payload:{type:'status', data:{status:{exec_info:{queue_remaining:remaining}}, sid}}});
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -74,4 +74,15 @@ test('whole batch is validated before any event is published and disposal cancel
   const good=fixture(t);
   good.calls[0].resolve(Response.json({events:[]})); await tick();
   good.stop(); t.mock.timers.tick(1000); assert.equal(good.calls.length,1);
+});
+
+test('engine_state projection accepts allowed residency states and rejects invalid values', async t => {
+  for (const state of ['zero_vram_standby', 'warming', 'ready', 'evicting']) {
+    const out = readStatusBatch({ events: [{ kind: 'heartbeat' }], engine_state: state }, 'lease-A');
+    assert.equal(out.length, 0);
+    assert.equal(out.engineState, state);
+    assert.equal(readEngineState({ events: [], engine_state: state }), state);
+  }
+  assert.throws(() => readStatusBatch({ events: [], engine_state: 'unknown_state' }, 'lease-A'));
+  assert.throws(() => readStatusBatch({ events: [], engine_state: 'ready', extra: 1 }, 'lease-A'));
 });
