@@ -1812,11 +1812,6 @@ asyncio.run(run_reap())
             engines.append(engine)
             return engine, engine.boot_id, engine.port
 
-        async def cleanup_engines():
-            for eng in engines:
-                await eng.stop(0)
-
-        self.addCleanup(cleanup_engines)
         sup = Supervisor(
             INSTANCE_ID,
             WORKER_TOKEN,
@@ -1840,7 +1835,6 @@ asyncio.run(run_reap())
         await sup_runner.setup()
         sup_site = web.TCPSite(sup_runner, '127.0.0.1', 0)
         await sup_site.start()
-        self.addCleanup(sup_runner.cleanup)
         sup_port = sup_site._server.sockets[0].getsockname()[1]
         base_url = f'http://127.0.0.1:{sup_port}'
 
@@ -1892,7 +1886,6 @@ asyncio.run(run_reap())
         await sched_runner.setup()
         sched_site = web.TCPSite(sched_runner, '127.0.0.1', 0)
         await sched_site.start()
-        self.addCleanup(sched_runner.cleanup)
         sched_port = sched_site._server.sockets[0].getsockname()[1]
 
         fake_proc = root / 'fake_proc_sync'
@@ -1916,48 +1909,55 @@ asyncio.run(run_reap())
                 h['X-VF-Engine-Epoch'] = str(epoch)
             return h
 
-        async with aiohttp.ClientSession(trust_env=False) as sess:
-            # 1) Initial S3 standby report
-            await sup.residency_sync_step()
-            self.assertEqual(len(reports), 1)
-            self.assertEqual(reports[0]['residency_state'], 'zero_vram_standby')
-            self.assertEqual(reports[0]['gpu_uuid'], 'GPU-00000000-0000-0000-0000-000000000001')
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as sess:
+                # 1) Initial S3 standby report
+                await sup.residency_sync_step()
+                self.assertEqual(len(reports), 1)
+                self.assertEqual(reports[0]['residency_state'], 'zero_vram_standby')
+                self.assertEqual(reports[0]['gpu_uuid'], 'GPU-00000000-0000-0000-0000-000000000001')
 
-            # 2) First prompt acquires lease-warm-101, wakes epoch 1, finishes -> S2 report + warm_idle_settled release!
-            pid1 = str(uuid.uuid4())
-            async with sess.post(
-                base_url + '/prompt',
-                json={'prompt_id': pid1, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
-                headers=hdrs(),
-            ) as resp:
-                self.assertEqual(resp.status, 200)
-            self.assertEqual(len(acquires), 1)
-            self.assertEqual(acquires[0]['candidate_gpu_uuids'], ['GPU-00000000-0000-0000-0000-000000000001'])
-            engines[0].finish_prompt(pid1)
-            await sess.get(base_url + f'/history/{pid1}', headers=hdrs(epoch=1))
-            self.assertEqual(sup.residency_state, 'idle_evictable')
+                # 2) First prompt acquires lease-warm-101, wakes epoch 1, finishes -> S2 report + warm_idle_settled release!
+                pid1 = str(uuid.uuid4())
+                async with sess.post(
+                    base_url + '/prompt',
+                    json={'prompt_id': pid1, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
+                    headers=hdrs(),
+                ) as resp:
+                    self.assertEqual(resp.status, 200)
+                self.assertEqual(len(acquires), 1)
+                self.assertEqual(acquires[0]['candidate_gpu_uuids'], ['GPU-00000000-0000-0000-0000-000000000001'])
+                engines[0].finish_prompt(pid1)
+                await sess.get(base_url + f'/history/{pid1}', headers=hdrs(epoch=1))
+                self.assertEqual(sup.residency_state, 'idle_evictable')
 
-            await sup.residency_sync_step()
-            self.assertEqual(reports[-1]['residency_state'], 'idle_evictable')
-            self.assertEqual(len(releases), 1)
-            self.assertEqual(releases[0][0], 'lease-warm-101')
-            self.assertEqual(releases[0][1]['reclaim_mode'], 'warm_idle_settled')
-            self.assertEqual(
-                releases[0][1]['reclaim_proof']['resident_procs'],
-                [{'pid': 40001, 'starttime_ticks': 888881}],
-            )
-            self.assertIsNone(sup.active_grant)
-            self.assertTrue(sup._warm_grant_settled)
+                await sup.residency_sync_step()
+                self.assertEqual(reports[-1]['residency_state'], 'idle_evictable')
+                self.assertEqual(reports[-1]['blocking_reason'], 'none')
+                self.assertEqual(len(releases), 1)
+                self.assertEqual(releases[0][0], 'lease-warm-101')
+                self.assertEqual(releases[0][1]['reclaim_mode'], 'warm_idle_settled')
+                self.assertEqual(
+                    releases[0][1]['reclaim_proof']['resident_procs'],
+                    [{'pid': 40001, 'starttime_ticks': 888881}],
+                )
+                self.assertIsNone(sup.active_grant)
+                self.assertTrue(sup._warm_grant_settled)
 
-            # 3) Second prompt while warm reacquires lease-warm-102 WITHOUT reloading inner ComfyUI!
-            pid2 = str(uuid.uuid4())
-            async with sess.post(
-                base_url + '/prompt',
-                json={'prompt_id': pid2, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
-                headers=hdrs(epoch=1),
-            ) as resp:
-                self.assertEqual(resp.status, 200)
-                self.assertEqual(resp.headers.get('X-VF-Engine-Epoch'), '1')
-            self.assertEqual(sup.reload_count, 1)
-            self.assertEqual(len(acquires), 2)
-            self.assertEqual(sup.active_grant['lease_id'], 'lease-warm-102')
+                # 3) Second prompt while warm reacquires lease-warm-102 WITHOUT reloading inner ComfyUI!
+                pid2 = str(uuid.uuid4())
+                async with sess.post(
+                    base_url + '/prompt',
+                    json={'prompt_id': pid2, 'prompt': {'1': {'class_type': 'KSampler', 'inputs': {}}}},
+                    headers=hdrs(epoch=1),
+                ) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(resp.headers.get('X-VF-Engine-Epoch'), '1')
+                self.assertEqual(sup.reload_count, 1)
+                self.assertEqual(len(acquires), 2)
+                self.assertEqual(sup.active_grant['lease_id'], 'lease-warm-102')
+        finally:
+            for eng in engines:
+                await eng.stop(0)
+            await sup_runner.cleanup()
+            await sched_runner.cleanup()

@@ -575,7 +575,9 @@ class Supervisor:
         self.active_grant = None
         self.residency_sync_enabled = os.environ.get('VF_GPU_RESIDENCY_SYNC') == '1'
         self._sync_wakeup = asyncio.Event()
+        self._sync_lock = asyncio.Lock()
         self._last_reported_key: tuple[str, int, int] | None = None
+        self._last_reported_sig: tuple[str, int, str, str] | None = None
         self._last_heartbeat_mono = 0.0
         self._last_grant_gpu_uuid = _resolve_visible_gpu_uuid(
             extra=(resource_binding or {}).get('gpu_uuid') or cuda_visible_devices
@@ -1181,8 +1183,13 @@ class Supervisor:
     async def residency_sync_step(self) -> None:
         if not self.residency_sync_enabled or not self.scheduler_url:
             return
+        async with self._sync_lock:
+            await self._residency_sync_step_locked()
+
+    async def _residency_sync_step_locked(self) -> None:
         report_body: dict | None = None
         report_key: tuple[str, int, int] | None = None
+        report_sig: tuple[str, int, str, str] | None = None
         hb_target: tuple[str, dict] | None = None
         binding = self.guard.resource_binding or {}
         pod_uid = (binding.get('pod_uid') or os.environ.get('COMFYUI_POD_UID') or '').strip()
@@ -1201,16 +1208,22 @@ class Supervisor:
             if isinstance(self.active_grant, dict) and self.active_grant.get('node_uid') and not node_uid:
                 node_uid = str(self.active_grant['node_uid']).strip()
             in_transition = state_name in {'sealing', 'draining_hard'}
+            cur_sig = (self.boot_id, int(self.gpu_epoch), str(state_name), str(reason))
+            if not in_transition and cur_sig != self._last_reported_sig:
+                if self._last_reported_key == (self.boot_id, int(self.gpu_epoch), int(self.residency_seq)):
+                    self.residency_seq += 1
+                    state_snap = self.gpu_state()
             cur_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
             if (
                 not in_transition
                 and self.instance_id
                 and pod_uid
                 and gpu_uuid
-                and cur_key != self._last_reported_key
+                and (cur_key != self._last_reported_key or cur_sig != self._last_reported_sig)
             ):
                 port = self.listen_port if self.listen_port > 0 else int(os.environ.get('COMFYUI_PORT', '8188'))
                 report_key = cur_key
+                report_sig = cur_sig
                 report_body = {
                     'instance_id': self.instance_id,
                     'node_uid': node_uid,
@@ -1262,6 +1275,8 @@ class Supervisor:
             if status_code in (200, 204, 409):
                 async with self.lock:
                     self._last_reported_key = report_key
+                    if report_sig is not None:
+                        self._last_reported_sig = report_sig
 
         if hb_target is not None:
             lid, hb_body = hb_target
@@ -2281,6 +2296,7 @@ class Supervisor:
             if already_standby_resp is not None:
                 async with self.lock:
                     self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
+                    self._last_reported_sig = (self.boot_id, int(self.gpu_epoch), 'zero_vram_standby', 'none')
                 if self.pending_releases and self.scheduler_url:
                     await self.flush_pending_releases()
                 return web.json_response(already_standby_resp, headers={'Cache-Control': 'no-store'})
@@ -2337,6 +2353,7 @@ class Supervisor:
                 self.last_evict_reason = 'HARD_EVICTED' if outcome.hard_used else 'SOFT_EVICTED'
                 self._set_state('zero_vram_standby')
                 self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
+                self._last_reported_sig = (self.boot_id, int(self.gpu_epoch), 'zero_vram_standby', 'none')
                 proof = self.last_reclaim_proof
                 return web.json_response({
                     'ok': True,
@@ -2522,6 +2539,7 @@ class Supervisor:
             if proof is not None:
                 if should_reap and reaped:
                     self._last_reported_key = (self.boot_id, int(self.gpu_epoch), int(self.residency_seq))
+                    self._last_reported_sig = (self.boot_id, int(self.gpu_epoch), 'zero_vram_standby', 'none')
                 resp_payload['sealed_gpu_epoch'] = int(proof['sealed_gpu_epoch'])
                 resp_payload['reclaim_proof'] = proof
             return web.json_response(resp_payload, status=status_code, headers={'Cache-Control': 'no-store'})
