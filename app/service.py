@@ -1018,7 +1018,59 @@ class Application:
             if name == 'task.submit':
                 self.flush_model_pin_releases()
                 snapshot = deepcopy(arguments['snapshot'])
-                self.policy.validate(snapshot)
+                try:
+                    self.policy.validate(snapshot)
+                except Error as exc:
+                    det = dict(exc.details or {})
+                    nid = str(det['node_id']) if det.get('node_id') is not None else None
+                    if nid is not None and hasattr(self.store, 'record_validation_trace'):
+                        raw_prompt = snapshot.get('prompt') if isinstance(snapshot, dict) else None
+                        node_obj = raw_prompt.get(nid) if isinstance(raw_prompt, dict) else None
+                        node_cls = str(node_obj.get('class_type')) if isinstance(node_obj, dict) and node_obj.get('class_type') else det.get('class_type')
+                        exp_t = det.get('expected_input_type')
+                        act_t = det.get('actual_input_type')
+                        reason_code = 'PORT_TYPE_MISMATCH' if (exp_t and act_t) else str(det.get('reason') or exc.code)
+                        dep_shas = [
+                            d['sha256'].lower()
+                            for d in (snapshot.get('dependencies') if isinstance(snapshot, dict) else None) or []
+                            if isinstance(d, dict) and isinstance(d.get('sha256'), str)
+                        ]
+                        preserve_set = set(self._known_model_hashes()) | set(dep_shas)
+                        raw_inputs = node_obj.get('inputs') if isinstance(node_obj, dict) and isinstance(node_obj.get('inputs'), dict) else {}
+                        scalar_ctx = {k: v for k, v in raw_inputs.items() if isinstance(v, (str, int, float, bool))}
+                        ctx_suffix = f" | node_inputs={json.dumps(scalar_ctx, ensure_ascii=False)[:1024]}" if scalar_ctx else ""
+                        tb_msg = (
+                            f"Port type mismatch on node {nid} ({node_cls}.{det.get('input_key', '')}): expected {exp_t}, got {act_t}{ctx_suffix}"
+                            if (exp_t and act_t)
+                            else f"Workflow validation rejected on node {nid} ({node_cls}): {reason_code}{ctx_suffix}"
+                        )
+                        sanitized_trace = sanitize_payload(
+                            {
+                                'failed_node_id': nid,
+                                'class_type': node_cls,
+                                'exception_type': reason_code,
+                                'expected_input_type': exp_t,
+                                'actual_input_type': act_t,
+                                'traceback': [tb_msg],
+                                'node_timings': [],
+                            },
+                            preserve_hashes=preserve_set,
+                        )
+                        trace_tid = self.store.record_validation_trace(
+                            principal,
+                            self.instance_id,
+                            project,
+                            str(arguments.get('idempotency_key') or ''),
+                            reason_code,
+                            sanitized_trace,
+                            dep_hashes=list(preserve_set),
+                        )
+                        det.setdefault('reason', reason_code)
+                        if node_cls:
+                            det.setdefault('class_type', node_cls)
+                        det['task_id'] = trace_tid
+                        raise Error(exc.code, exc.status, details=det) from None
+                    raise
 
                 smoke_session_id = arguments.get('session_id')
                 smoke_expected_ver = arguments.get('expected_draft_version')

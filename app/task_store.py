@@ -272,6 +272,19 @@ class TaskStore:
                 completed_runs INTEGER NOT NULL DEFAULT 0,
                 updated_ns INTEGER NOT NULL
               );
+              CREATE TABLE IF NOT EXISTS validation_error_traces (
+                task_id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                organization_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                trace_json TEXT NOT NULL,
+                dep_hashes_json TEXT NOT NULL,
+                created_ns INTEGER NOT NULL,
+                UNIQUE(organization_id, owner_id, instance_id, project_id, idempotency_key)
+              );
             ''')
             intent_ddl_row = db.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='model_admission_intents'"
@@ -1190,9 +1203,77 @@ class TaskStore:
                 (encoded, attempt_worker_id, peak_vram_mib, task_id),
             )
 
+    def record_validation_trace(
+        self,
+        principal,
+        instance_id: str,
+        project_id: str,
+        idempotency_key: str,
+        error_code: str,
+        trace: dict,
+        *,
+        dep_hashes: list[str] | tuple[str, ...] = (),
+    ) -> str:
+        encoded_trace = canonical(trace)
+        encoded_deps = canonical([str(h).lower() for h in dep_hashes if isinstance(h, str)])
+        with self.transaction() as db:
+            existing = db.execute(
+                '''SELECT task_id FROM validation_error_traces
+                   WHERE organization_id=? AND owner_id=? AND instance_id=? AND project_id=? AND idempotency_key=?''',
+                (principal.organization_id, principal.user_id, instance_id, project_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                return str(existing['task_id'])
+            tid = str(uuid.uuid4())
+            db.execute(
+                '''INSERT INTO validation_error_traces
+                   (task_id, instance_id, organization_id, owner_id, project_id, idempotency_key,
+                    error_code, trace_json, dep_hashes_json, created_ns)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                (
+                    tid,
+                    instance_id,
+                    principal.organization_id,
+                    principal.user_id,
+                    project_id,
+                    idempotency_key,
+                    error_code,
+                    encoded_trace,
+                    encoded_deps,
+                    time.time_ns(),
+                ),
+            )
+            return tid
+
     def get_task_for_trace(self, principal, project_id, task_id, *, instance_id=None, headless_only=False):
         with self.transaction() as db:
-            row = self.task(db, task_id)
+            try:
+                row = self.task(db, task_id)
+            except TaskError as exc:
+                if str(exc) != 'NOT_FOUND' or headless_only:
+                    raise
+                vrow = db.execute(
+                    'SELECT * FROM validation_error_traces WHERE task_id=?',
+                    (task_id,),
+                ).fetchone()
+                if vrow is None or vrow['organization_id'] != principal.organization_id:
+                    raise TaskError('NOT_FOUND') from None
+                if instance_id is not None and vrow['instance_id'] != instance_id:
+                    raise TaskError('NOT_FOUND') from None
+                if vrow['project_id'] != project_id:
+                    raise TaskError('FORBIDDEN') from None
+                deps_list = json.loads(vrow['dep_hashes_json']) if vrow['dep_hashes_json'] else []
+                return {
+                    'id': vrow['task_id'],
+                    'instance_id': vrow['instance_id'],
+                    'project_id': vrow['project_id'],
+                    'state': 'failed',
+                    'error': vrow['error_code'],
+                    'attempt_worker_id': None,
+                    'peak_vram_mib': None,
+                    'snapshot': {'dependencies': [{'sha256': h} for h in deps_list]},
+                    'trace': json.loads(vrow['trace_json']) if vrow['trace_json'] else {},
+                }
             if row['organization_id'] != principal.organization_id:
                 raise TaskError('NOT_FOUND')
             if headless_only:

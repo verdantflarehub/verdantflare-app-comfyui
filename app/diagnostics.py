@@ -1158,6 +1158,9 @@ def extract_execution_trace_from_history(history: dict, *, prompt_id: str, prese
                     tb_lines = raw_tb.splitlines()
                 if exc_msg and exc_msg not in '\n'.join(tb_lines):
                     tb_lines.append(exc_msg)
+                cur_in = payload.get('current_inputs')
+                if isinstance(cur_in, dict) and cur_in:
+                    tb_lines.append(f"current_inputs={_canonical_json(cur_in)[:1024]}")
                 if (expected_input_type is None or actual_input_type is None) and exc_msg:
                     m = TYPE_MISMATCH_RE.search(exc_msg)
                     if m:

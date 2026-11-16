@@ -509,6 +509,49 @@ class T31RoutingAndAuthTest(unittest.TestCase):
             self.assertTrue(is_err)
             self.assertEqual(forbid['code'], 'FORBIDDEN')
 
+        # Static port-type mismatch on task.submit records sanitized validation trace with zero queue admission
+        app.policy.bind_model_cache(object())
+        with store.transaction() as db:
+            tasks_before = db.execute('SELECT COUNT(*) FROM tasks WHERE instance_id=?', (instance_id,)).fetchone()[0]
+        bad_port_snap = {
+            'workflow': {},
+            'prompt': {
+                '5': {'class_type': 'EmptyLatentImage', 'inputs': {'width': 64, 'height': 64, 'batch_size': 1}},
+                '6': {'class_type': 'CLIPTextEncode', 'inputs': {'text': 'hello', 'clip': ['5', 0]}},
+                '9': {'class_type': 'SaveImage', 'inputs': {'filename_prefix': 'out', 'images': ['6', 0]}},
+            },
+            'dependencies': [],
+            'inputs': [],
+        }
+        _, is_err, bad_submit = self._mcp_tool_call(
+            port, 'comfyuiA', 'task.submit',
+            {'project_id': self.project_a, 'idempotency_key': 'bad-port-1', 'snapshot': bad_port_snap},
+            user_id=self.owner_id,
+        )
+        self.assertTrue(is_err)
+        self.assertEqual(bad_submit['code'], 'WORKFLOW_NOT_ALLOWED')
+        val_tid = bad_submit['task_id']
+        with store.transaction() as db:
+            tasks_after = db.execute('SELECT COUNT(*) FROM tasks WHERE instance_id=?', (instance_id,)).fetchone()[0]
+        self.assertEqual(tasks_after, tasks_before)
+        _, is_err, val_trace = self._mcp_tool_call(
+            port, 'comfyuiA', 'diag.execution_trace',
+            {'project_id': self.project_a, 'task_id': val_tid},
+            user_id=self.member_id,
+        )
+        self.assertFalse(is_err)
+        self.assertEqual(val_trace['failed_node_id'], '6')
+        self.assertEqual(val_trace['class_type'], 'CLIPTextEncode')
+        self.assertEqual(val_trace['expected_input_type'], 'CLIP')
+        self.assertEqual(val_trace['actual_input_type'], 'LATENT')
+        _, is_err, val_forbid = self._mcp_tool_call(
+            port, 'comfyuiA', 'diag.execution_trace',
+            {'project_id': self.project_b, 'task_id': val_tid},
+            user_id=self.outsider_id,
+        )
+        self.assertTrue(is_err)
+        self.assertEqual(val_forbid['code'], 'FORBIDDEN')
+
         # Headless cross-project task.get also returns 403 FORBIDDEN (S7)
         _, is_err, h_get_forbid = self._mcp_tool_call(
             port, 'comfyui-api', 'task.get',
