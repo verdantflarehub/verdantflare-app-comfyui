@@ -562,7 +562,7 @@ def main():
             if headless_worker_token in credentials or not token_valid(headless_worker_token):
                 raise ValueError('distinct headless worker credential required')
             credentials.add(headless_worker_token)
-            headless_client = NativeClient(headless_worker_origin, token=headless_worker_token, timeout=5)
+            headless_client = NativeClient(headless_worker_origin, token=headless_worker_token, timeout=45)
         headless_runner = HeadlessPoolRunner(
             headless_workspace_dir,
             worker_client=headless_client,

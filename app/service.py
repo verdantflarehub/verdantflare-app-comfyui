@@ -436,6 +436,12 @@ def _execute_api_invoke(
                 expected_boot_id=observed_boot_id,
                 expected_image_digest=exec_digest,
             )
+            if run_res.get('trace') and hasattr(store, 'record_execution_trace'):
+                store.record_execution_trace(
+                    task['id'],
+                    run_res['trace'],
+                    attempt_worker_id=run_res.get('attempt_worker_id'),
+                )
             if run_res.get('outputs'):
                 task = store.complete_headless_task(
                     task['id'],
@@ -560,7 +566,7 @@ class Application:
     def __init__(self, store, *, alias, instance_id, principal, project_access, policy, native=None,
                  instance_state='running', profile_id='base-cpu', app_version='0.1.2',
                  image_digest=None, restart_coordinator=None, local_log_ring=None, model_cache=None,
-                 artifact_store=None, headless_runner=None):
+                 artifact_store=None, headless_runner=None, execution_driver=None):
         if (not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9]{0,63}', alias)
                 or not all(valid_id(v) for v in (instance_id, principal.user_id, principal.organization_id))):
             raise ValueError('invalid instance binding')
@@ -576,10 +582,31 @@ class Application:
         self.model_cache = model_cache
         self.artifact_store = artifact_store
         self.headless_runner = headless_runner
+        self.execution_driver = execution_driver
         if self.policy is not None and getattr(self.policy, 'model', None) is None and self.model_cache is not None and hasattr(self.policy, 'bind_model_cache'):
             self.policy.bind_model_cache(self.model_cache)
         store.register_instance(instance_id, principal)
         self.editing = Editing(store)
+
+    def _drive_interactive_execution(self, principal, project, task, *, allow_org_member=False):
+        driver = getattr(self, 'execution_driver', None)
+        if (
+            driver is None
+            or not isinstance(task, dict)
+            or task.get('execution_pool') == 'headless_api'
+            or task.get('generation') != getattr(driver, 'generation', None)
+            or task.get('state') not in {'queued', 'dispatching', 'running', 'cancelling', 'collecting'}
+        ):
+            return task
+        fence = self.store.get_operation_fence(self.instance_id) if hasattr(self.store, 'get_operation_fence') else None
+        if isinstance(fence, dict) and fence.get('state') in {'in_progress', 'quarantined'}:
+            return task
+        try:
+            driver.tick()
+        except TaskError as exc:
+            if str(exc) != 'STALE_GENERATION':
+                raise
+        return self.store.get(principal, task['id'], project, allow_org_member=allow_org_member)
 
     def _current_worker_image_digest(self) -> str | None:
         if self.native is not None and hasattr(self.native, 'runtime_spec'):
@@ -1156,17 +1183,24 @@ class Application:
                         if str(exc) != 'INVALID_TRANSITION':
                             raise
                         task = self.store.get(principal, task['id'], project, allow_org_member=allow_member)
+                task = self._drive_interactive_execution(principal, project, task, allow_org_member=allow_member)
             elif name == 'task.cancel':
                 def _do_cancel(_req_sha=None, _res_id=None, _owner_proc=None):
                     cancelled = self.store.cancel(
                         principal, task['id'], project, allow_org_member=allow_member
                     )
+                    if cancelled['state'] == 'cancelling':
+                        cancelled = self._drive_interactive_execution(
+                            principal, project, cancelled, allow_org_member=allow_member
+                        )
                     if cancelled['state'] == 'cancelled':
                         self.flush_model_pin_releases()
                     return self.public_task(cancelled)
                 if 'idempotency_key' in arguments:
                     return self._idempotent_write(principal, project, 'task.cancel', arguments, _do_cancel)
                 return _do_cancel()
+            elif name == 'task.get':
+                task = self._drive_interactive_execution(principal, project, task, allow_org_member=allow_member)
             return self.public_task(task)
         except TaskError as exc:
             code = str(exc)

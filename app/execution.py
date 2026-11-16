@@ -66,7 +66,7 @@ class NativeClient:
             raise Error('STALE_WORKER', 409)
         result = dict(result)
         result.setdefault('boot_id', boot)
-        self.engine_epoch = result['gpu_epoch'] or None
+        self.engine_epoch = None if result['residency_state'] == 'zero_vram_standby' else (result['gpu_epoch'] or None)
         return result
 
     def evict_vram(self, instance_id, body=None):
@@ -487,6 +487,11 @@ class ExecutionAdapter:
                     self.app.release_task_model_pins(out, 'task_cancelled')
                 return out
             try:
+                if getattr(self.native, 'engine_epoch', None) is not None and hasattr(self.native, 'gpu_state'):
+                    try:
+                        self.native.gpu_state(self.app.instance_id)
+                    except Error:
+                        pass
                 # Any unknown existing native work blocks submission.
                 if self.native.position(task['prompt_id']) is not None:
                     raise Error('EXECUTION_UNCERTAIN', 503)
@@ -504,9 +509,19 @@ class ExecutionAdapter:
             return self.store.mark_uncertain(task['id'], self.generation)
         try:
             history = self.native.history(task['prompt_id'])
+            position = None
+            if history is None:
+                position = self.native.position(task['prompt_id'])
+                if position is None:
+                    history = self.native.history(task['prompt_id'])
             if history is not None:
                 state, evidence = receipt(task, history, self.app.policy.compile(task))
                 if state == 'success':
+                    if hasattr(self.store, 'record_execution_trace'):
+                        from .diagnostics import extract_execution_trace_from_history
+                        model_hashes = [d['sha256'] for d in task.get('snapshot', {}).get('dependencies', []) if isinstance(d, dict) and 'sha256' in d]
+                        trace = extract_execution_trace_from_history(history, prompt_id=task['prompt_id'], preserve_hashes=model_hashes)
+                        self.store.record_execution_trace(task['id'], trace, attempt_worker_id=self.app.instance_id)
                     self.store.dispatch_acknowledged(task['id'], self.generation)
                     collected = self.store.execution_finished(task['id'], self.generation, evidence)
                     if getattr(self.app, 'artifact_store', None) is not None and hasattr(self.native, 'collect_task_outputs'):
@@ -522,13 +537,12 @@ class ExecutionAdapter:
                     from .diagnostics import extract_execution_trace_from_history
                     model_hashes = [d['sha256'] for d in task.get('snapshot', {}).get('dependencies', []) if isinstance(d, dict) and 'sha256' in d]
                     trace = extract_execution_trace_from_history(history, prompt_id=task['prompt_id'], preserve_hashes=model_hashes)
-                    self.store.record_execution_trace(task['id'], trace)
+                    self.store.record_execution_trace(task['id'], trace, attempt_worker_id=self.app.instance_id)
                 self._scrub_task_workspace_best_effort(task)
                 out = self.store.fail(task['id'], self.generation, 'NATIVE_EXECUTION_FAILED')
                 if hasattr(self.app, 'release_task_model_pins'):
                     self.app.release_task_model_pins(out, 'task_failed')
                 return out
-            position = self.native.position(task['prompt_id'])
             if position is None:
                 return self.store.mark_uncertain(task['id'], self.generation)
             task = self.store.dispatch_acknowledged(task['id'], self.generation)

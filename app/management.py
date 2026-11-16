@@ -60,6 +60,9 @@ class InstanceManager:
         self.artifact_store = artifact_store
         self.headless_runner = headless_runner
         self.project_access, self.frontend = None, None
+        import threading
+        self._exec_locks_guard = threading.Lock()
+        self._exec_locks: dict[tuple[str, int], threading.Lock] = {}
         with store.transaction() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS managed_instances (
                 id TEXT PRIMARY KEY REFERENCES instances(id), installation_id TEXT NOT NULL,
@@ -1368,7 +1371,7 @@ class InstanceManager:
             except Error:
                 native = None
 
-        return Application(
+        app = Application(
             self.store,
             alias=alias,
             instance_id=instance_id,
@@ -1385,6 +1388,23 @@ class InstanceManager:
             artifact_store=self.artifact_store,
             headless_runner=self.headless_runner,
         )
+        from .runtime import RuntimeClient
+        if isinstance(self.runtime, RuntimeClient) and native is not None and inst_state == 'running':
+            import threading
+            from .execution import ExecutionAdapter
+            gen_i = int(row['generation'])
+            key = (instance_id, gen_i)
+            with self._exec_locks_guard:
+                if len(self._exec_locks) > 512:
+                    self._exec_locks = {k: v for k, v in self._exec_locks.items() if k[0] == instance_id}
+                shared_lock = self._exec_locks.get(key)
+                if shared_lock is None:
+                    shared_lock = threading.Lock()
+                    self._exec_locks[key] = shared_lock
+            adapter = ExecutionAdapter(app, native, gen_i)
+            adapter.lock = shared_lock
+            app.execution_driver = adapter
+        return app
 
     def resolve(self, principal, body):
         if (not isinstance(body, dict) or set(body) != {'instanceId', 'entryId'}

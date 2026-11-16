@@ -1951,6 +1951,11 @@ class HeadlessPoolRunner:
         self.worker_client.boot_id = boot
         if callable(cancel_check) and cancel_check():
             raise HeadlessCancelled()
+        if getattr(self.worker_client, 'engine_epoch', None) is not None and hasattr(self.worker_client, 'gpu_state'):
+            try:
+                self.worker_client.gpu_state(self.worker_id)
+            except Error:
+                pass
         if self.worker_client.position(prompt_id) is not None:
             raise Error('EXECUTION_UNCERTAIN', 503)
 
@@ -1974,14 +1979,14 @@ class HeadlessPoolRunner:
                 )
                 if r_state == 'cancelled':
                     raise HeadlessCancelled()
+                trace = extract_execution_trace_from_history(
+                    hist,
+                    prompt_id=prompt_id,
+                    preserve_hashes=preserve_hashes or set(),
+                )
                 if r_state != 'success':
-                    trace = extract_execution_trace_from_history(
-                        hist,
-                        prompt_id=prompt_id,
-                        preserve_hashes=preserve_hashes or set(),
-                    )
                     raise Error('NATIVE_EXECUTION_FAILED', 502, details={'trace': trace})
-                return
+                return trace
 
             pos = self.worker_client.position(prompt_id)
             if callable(cancel_check) and cancel_check():
@@ -2111,6 +2116,7 @@ class HeadlessPoolRunner:
                     )
 
                 archived_outputs: list[dict] = []
+                run_trace: dict | None = None
                 primary_exc: BaseException | None = None
                 engine_in_flight = {'running': False}
                 reconcile_quarantine_exc: Error | None = None
@@ -2149,7 +2155,7 @@ class HeadlessPoolRunner:
                         if callable(cancel_check) and cancel_check():
                             raise HeadlessCancelled()
                     elif self.worker_client is not None:
-                        self._run_on_native_worker(
+                        run_trace = self._run_on_native_worker(
                             project_id=project_id,
                             task_id=task_id,
                             prompt_id=eff_prompt_id,
@@ -2293,6 +2299,7 @@ class HeadlessPoolRunner:
                 'engine_epoch': self.engine_epoch,
                 'prompt_id': eff_prompt_id,
                 'outputs': archived_outputs,
+                'trace': run_trace,
             }
 
     def recover_quarantine(

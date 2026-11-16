@@ -377,8 +377,8 @@ def validate_reclamation_proof(
 
 
 class BoundNativeClient(NativeClient):
-    def __init__(self, access):
-        super().__init__(access['worker_origin'], token=access['worker_token'], timeout=3)
+    def __init__(self, access, *, timeout=45):
+        super().__init__(access['worker_origin'], token=access['worker_token'], timeout=timeout)
         self.expected_instance, self.expected_boot = access['instance_id'], access['boot_id']
         self.boot_id = self.expected_boot
 

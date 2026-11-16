@@ -1142,6 +1142,8 @@ def extract_execution_trace_from_history(history: dict, *, prompt_id: str, prese
                 if isinstance(ts, (int, float)) and nid in start_ts_by_node:
                     dur = max(0.0, float(ts - start_ts_by_node[nid]))
                 node_timings.append({'node_id': nid, 'duration_ms': dur})
+            elif ev_name == 'execution_success' and isinstance(ts, (int, float)) and '__root__' in start_ts_by_node and not node_timings:
+                node_timings.append({'node_id': '__total__', 'duration_ms': max(0.0, float(ts - start_ts_by_node['__root__']))})
             elif ev_name == 'execution_error':
                 failed_node_id = str(payload.get('node_id')) if payload.get('node_id') is not None else failed_node_id
                 class_type = payload.get('node_type') or class_type

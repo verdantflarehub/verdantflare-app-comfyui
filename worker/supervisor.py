@@ -242,7 +242,14 @@ def list_adopted_descendants(supervisor_pid, whitelist_identities, *, proc_root=
     return discovered
 
 
-def _resolve_visible_gpu_uuid(env=None, *, extra=None) -> str:
+def _resolve_visible_gpu_uuid(
+    env=None,
+    *,
+    extra=None,
+    allow_host_probe: bool = False,
+    dev_root: Path = Path('/dev'),
+    nvidia_gpus_dir: Path = Path('/proc/driver/nvidia/gpus'),
+) -> str:
     source_env = os.environ if env is None else env
     candidates = [extra] if isinstance(extra, str) and extra.strip() else []
     for key in ('COMFYUI_GPU_UUID', 'VF_VISIBLE_GPU_UUIDS', 'NVIDIA_VISIBLE_DEVICES', 'CUDA_VISIBLE_DEVICES'):
@@ -254,6 +261,22 @@ def _resolve_visible_gpu_uuid(env=None, *, extra=None) -> str:
             cand = tok.strip()
             if GPU_UUID_RE.fullmatch(cand):
                 return cand
+    if allow_host_probe and dev_root.is_dir() and nvidia_gpus_dir.is_dir():
+        try:
+            for entry in sorted(nvidia_gpus_dir.iterdir()):
+                info_file = entry / 'information'
+                if not info_file.is_file():
+                    continue
+                text = info_file.read_text(encoding='utf-8', errors='replace')
+                minor_m = re.search(r'(?m)^Device Minor:\s*([0-9]+)\s*$', text)
+                uuid_m = re.search(r'(?m)^GPU UUID:\s*(GPU-[0-9a-fA-F-]+)\s*$', text)
+                if minor_m and uuid_m:
+                    minor = minor_m.group(1)
+                    cand_uuid = uuid_m.group(1).strip()
+                    if (dev_root / f'nvidia{minor}').exists() and GPU_UUID_RE.fullmatch(cand_uuid):
+                        return cand_uuid
+        except OSError:
+            pass
     return ''
 
 
@@ -3154,7 +3177,7 @@ class Supervisor:
             if live_lineage is None:
                 return web.json_response({'queue_running': [], 'queue_pending': []},
                                          headers={'Cache-Control': 'no-store',
-                                                  'X-VF-Engine-Epoch': str(self.gpu_epoch)})
+                                                  'X-VF-Engine-Epoch': '0'})
             status, raw, _ = await self._proxy_inner_json(live_lineage, 'GET', '/queue')
             if status == 200:
                 try:
@@ -3199,7 +3222,7 @@ class Supervisor:
                 )
             if live_lineage is None:
                 return web.json_response({}, headers={'Cache-Control': 'no-store',
-                                                      'X-VF-Engine-Epoch': str(self.gpu_epoch)})
+                                                      'X-VF-Engine-Epoch': '0'})
             status, raw, _ = await self._proxy_inner_json(live_lineage, 'GET', request.path)
             if status == 200:
                 try:
