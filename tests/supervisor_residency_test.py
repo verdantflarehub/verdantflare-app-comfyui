@@ -1961,3 +1961,50 @@ asyncio.run(run_reap())
                 await eng.stop(0)
             await sup_runner.cleanup()
             await sched_runner.cleanup()
+
+    async def test_framed_binary_stream_fileno_and_cdi_gpu_uuid_probe(self):
+        import io
+        import os
+        import tempfile
+        from pathlib import Path
+        from worker.launch import _FramedStdStream
+        from worker.supervisor import _resolve_visible_gpu_uuid
+
+        r_fd, w_fd = os.pipe()
+        raw_out = os.fdopen(w_fd, 'w', encoding='utf-8')
+        raw_in = os.fdopen(r_fd, 'rb')
+        try:
+            framed = _FramedStdStream(raw_out, 'a' * 32)
+            wrapped = io.TextIOWrapper(framed.buffer, encoding=framed.encoding, line_buffering=True)
+            self.assertEqual(wrapped.fileno(), raw_out.fileno())
+            self.assertEqual(framed.buffer.fileno(), raw_out.fileno())
+            self.assertFalse(framed.buffer.isatty())
+            wrapped.write('hello-faulthandler\n')
+            wrapped.flush()
+            framed.buffer.close()
+        finally:
+            raw_in.close()
+            raw_out.close()
+
+        with tempfile.TemporaryDirectory() as td:
+            troot = Path(td)
+            dev_dir = troot / 'fake_dev'
+            gpus_dir = troot / 'fake_proc_gpus'
+            dev_dir.mkdir(parents=True, exist_ok=True)
+            (dev_dir / 'nvidia1').write_bytes(b'')
+            for bdf, minor, uuid_str in (
+                ('0000_01_00.0', 0, 'GPU-29a56c24-484e-d51d-fac9-b141be9e24c5'),
+                ('0000_02_00.0', 1, 'GPU-798fb508-830f-b538-6733-72ed6d210d40'),
+            ):
+                d = gpus_dir / bdf
+                d.mkdir(parents=True, exist_ok=True)
+                (d / 'information').write_text(
+                    f'Model:\tNVIDIA GeForce RTX 5090\nGPU UUID:\t{uuid_str}\nDevice Minor:\t{minor}\n',
+                    encoding='utf-8',
+                )
+            cdi_env = {'NVIDIA_VISIBLE_DEVICES': 'void'}
+            self.assertEqual(_resolve_visible_gpu_uuid(cdi_env, allow_host_probe=False, dev_root=dev_dir, nvidia_gpus_dir=gpus_dir), '')
+            self.assertEqual(
+                _resolve_visible_gpu_uuid(cdi_env, allow_host_probe=True, dev_root=dev_dir, nvidia_gpus_dir=gpus_dir),
+                'GPU-798fb508-830f-b538-6733-72ed6d210d40',
+            )

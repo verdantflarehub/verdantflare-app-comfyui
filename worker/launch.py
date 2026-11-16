@@ -172,6 +172,19 @@ class _FramedBinaryStream:
     def seekable(self):
         return False
 
+    def fileno(self):
+        return self._owner.fileno()
+
+    def isatty(self):
+        return self._owner.isatty()
+
+    @property
+    def name(self):
+        return self._owner.name
+
+    def close(self):
+        self.flush()
+
     @property
     def closed(self):
         raw_buf = getattr(self._owner._raw, 'buffer', None)

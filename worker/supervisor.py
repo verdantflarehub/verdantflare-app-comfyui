@@ -603,7 +603,8 @@ class Supervisor:
         self._last_reported_sig: tuple[str, int, str, str] | None = None
         self._last_heartbeat_mono = 0.0
         self._last_grant_gpu_uuid = _resolve_visible_gpu_uuid(
-            extra=(resource_binding or {}).get('gpu_uuid') or cuda_visible_devices
+            extra=(resource_binding or {}).get('gpu_uuid') or cuda_visible_devices,
+            allow_host_probe=(spawner is None and device_mode == 'cuda'),
         )
         self._warm_grant_settled = False
         self._load_fence_state_on_boot()
@@ -1226,7 +1227,10 @@ class Supervisor:
             gpu_uuid = (
                 (self.active_grant or {}).get('gpu_uuid')
                 or self._last_grant_gpu_uuid
-                or _resolve_visible_gpu_uuid(extra=binding.get('gpu_uuid') or self.cuda_visible_devices)
+                or _resolve_visible_gpu_uuid(
+                    extra=binding.get('gpu_uuid') or self.cuda_visible_devices,
+                    allow_host_probe=(self.spawner is None and self.device_mode == 'cuda'),
+                )
             )
             if isinstance(self.active_grant, dict) and self.active_grant.get('node_uid') and not node_uid:
                 node_uid = str(self.active_grant['node_uid']).strip()
@@ -1494,7 +1498,10 @@ class Supervisor:
         attempt_id = str(uuid.uuid4())
         binding = self.guard.resource_binding or {}
         explicit_gpu_uuid = (binding.get('gpu_uuid') or os.environ.get('COMFYUI_GPU_UUID') or '').strip()
-        cand_gpu_uuid = explicit_gpu_uuid or _resolve_visible_gpu_uuid(extra=self.cuda_visible_devices)
+        cand_gpu_uuid = explicit_gpu_uuid or _resolve_visible_gpu_uuid(
+            extra=self.cuda_visible_devices,
+            allow_host_probe=(self.spawner is None and self.device_mode == 'cuda'),
+        )
         node_uid = (binding.get('node_uid') or os.environ.get('COMFYUI_NODE_UID') or os.environ.get('NODE_UID') or '').strip()
         idempotency_key = f'comfyui-wake-{self.instance_id}-{attempt_id}'
         req_body = {
