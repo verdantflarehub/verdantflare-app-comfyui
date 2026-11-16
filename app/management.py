@@ -1273,9 +1273,11 @@ class InstanceManager:
             )
 
         started = self.runtime.start(owner, start_req)
-        start_deadline = max(time.monotonic() + 2.0, deadline)
+        min_start_window = 35.0 if require_puid else 2.0
+        poll_sleep = 0.25 if require_puid else 0.02
+        start_deadline = max(time.monotonic() + min_start_window, deadline)
         while isinstance(started, dict) and started.get('status') == 'running' and time.monotonic() < start_deadline:
-            time.sleep(0.02)
+            time.sleep(poll_sleep)
             started = self.runtime.start(owner, start_req)
         access = self.runtime.access(owner, start_req) if (isinstance(started, dict) and started.get('status') == 'succeeded') else None
         new_boot = access['boot_id'] if isinstance(access, dict) else None
