@@ -278,7 +278,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 svc.authorize_mcp_transport(target_alias, principal)
                 if self.headers.get('Mcp-Session-Id') is not None:
-                    raise Error('STATELESS_TRANSPORT_NO_SESSION_HEADER')
+                    from .diagnostics import sanitize_text
+                    raise Error(
+                        'STATELESS_TRANSPORT_NO_SESSION_HEADER',
+                        details={'header_audit': sanitize_text('Mcp-Session-Id: ' + str(self.headers.get('Mcp-Session-Id', '')))},
+                    )
                 versions = self.headers.get_all('MCP-Protocol-Version', [])
                 if len(versions) > 1 or versions and versions[0] != PROTOCOL:
                     raise Error('UNSUPPORTED_PROTOCOL_VERSION')

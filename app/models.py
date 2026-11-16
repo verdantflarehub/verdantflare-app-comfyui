@@ -832,32 +832,34 @@ class LocalModelProvisioner:
             return self._status_view_locked(entry)
 
     def _validate_url_ssrf(self, raw_url: str) -> tuple[str, str]:
+        from .diagnostics import sanitize_text
+        audit_detail = {'url_audit': sanitize_text(str(raw_url))}
         if not isinstance(raw_url, str) or not raw_url.strip() or any(ch.isspace() for ch in raw_url):
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         parsed = urlsplit(raw_url.strip())
         if parsed.scheme.lower() != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         if parsed.port not in (None, 443):
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         host = parsed.hostname.rstrip('.').lower()
         try:
             ipaddress.ip_address(host)
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         except ValueError:
             pass
         if host not in self.allowed_hosts:
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         if self.dns_resolver is not None:
             ips = self.dns_resolver(host)
         else:
             infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
             ips = [item[4][0] for item in infos]
         if not ips:
-            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+            raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         for ip_str in ips:
             allowed, _reason = classify_ip_ssrf(ip_str)
             if not allowed:
-                raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403)
+                raise Error('MODEL_SOURCE_SSRF_BLOCKED', 403, details=audit_detail)
         return raw_url.strip(), host
 
     def _fetch_verified_bytes(self, source_url: str, bearer_token: str | None = None) -> bytes:

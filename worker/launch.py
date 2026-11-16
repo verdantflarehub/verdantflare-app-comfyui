@@ -23,6 +23,7 @@ from .supervisor import register_epoch_shm_object, resolve_container_id, validat
 
 _IN_LOG_FRAME = contextvars.ContextVar('vf_in_log_frame', default=False)
 _ACTIVE_FRAME_PID = contextvars.ContextVar('vf_active_frame_pid', default=None)
+_ACTIVE_STATUS_MESSAGES = contextvars.ContextVar('vf_active_status_messages', default=None)
 _STREAM_FRAME_LOCK = threading.RLock()
 
 
@@ -405,12 +406,37 @@ def _exit_log_frame(frame_nonce: str, pid_tok):
 
 
 def install_execution_framing(execution_module, frame_nonce: str):
-    if not frame_nonce:
-        return
-    _install_std_stream_proxies(frame_nonce)
+    if frame_nonce:
+        _install_std_stream_proxies(frame_nonce)
     executor_cls = getattr(execution_module, 'PromptExecutor', None)
     if executor_cls is None or getattr(executor_cls, '_vf_log_framed', False):
         return
+    orig_get_output = getattr(execution_module, 'get_output_data', None)
+    if orig_get_output is not None and not getattr(orig_get_output, '_vf_node_timed', False):
+        if inspect.iscoroutinefunction(orig_get_output):
+            async def _timed_get_output_async(prompt_id, unique_id, obj, *args, _orig_go=orig_get_output, **kwargs):
+                msgs = _ACTIVE_STATUS_MESSAGES.get()
+                nid = str(unique_id) if unique_id is not None else None
+                if isinstance(msgs, list) and nid is not None:
+                    msgs.append(['executing', {'node': nid, 'prompt_id': prompt_id, 'timestamp': round(time.time() * 1000.0, 3)}])
+                res = await _orig_go(prompt_id, unique_id, obj, *args, **kwargs)
+                if isinstance(msgs, list) and nid is not None:
+                    msgs.append(['executed', {'node': nid, 'prompt_id': prompt_id, 'timestamp': round(time.time() * 1000.0, 3)}])
+                return res
+            _timed_get_output_async._vf_node_timed = True
+            setattr(execution_module, 'get_output_data', _timed_get_output_async)
+        else:
+            def _timed_get_output_sync(prompt_id, unique_id, obj, *args, _orig_go=orig_get_output, **kwargs):
+                msgs = _ACTIVE_STATUS_MESSAGES.get()
+                nid = str(unique_id) if unique_id is not None else None
+                if isinstance(msgs, list) and nid is not None:
+                    msgs.append(['executing', {'node': nid, 'prompt_id': prompt_id, 'timestamp': round(time.time() * 1000.0, 3)}])
+                res = _orig_go(prompt_id, unique_id, obj, *args, **kwargs)
+                if isinstance(msgs, list) and nid is not None:
+                    msgs.append(['executed', {'node': nid, 'prompt_id': prompt_id, 'timestamp': round(time.time() * 1000.0, 3)}])
+                return res
+            _timed_get_output_sync._vf_node_timed = True
+            setattr(execution_module, 'get_output_data', _timed_get_output_sync)
     for method_name in ('execute', 'execute_async'):
         orig = getattr(executor_cls, method_name, None)
         if orig is None:
@@ -421,9 +447,11 @@ def install_execution_framing(execution_module, frame_nonce: str):
                     return await _orig(self, prompt, prompt_id, *args, **kwargs)
                 tok = _IN_LOG_FRAME.set(True)
                 pid_tok = _enter_log_frame(frame_nonce, prompt_id)
+                msgs_tok = _ACTIVE_STATUS_MESSAGES.set(getattr(self, 'status_messages', None))
                 try:
                     return await _orig(self, prompt, prompt_id, *args, **kwargs)
                 finally:
+                    _ACTIVE_STATUS_MESSAGES.reset(msgs_tok)
                     _exit_log_frame(frame_nonce, pid_tok)
                     _IN_LOG_FRAME.reset(tok)
             setattr(executor_cls, method_name, _wrapped_async)
@@ -433,9 +461,11 @@ def install_execution_framing(execution_module, frame_nonce: str):
                     return _orig(self, prompt, prompt_id, *args, **kwargs)
                 tok = _IN_LOG_FRAME.set(True)
                 pid_tok = _enter_log_frame(frame_nonce, prompt_id)
+                msgs_tok = _ACTIVE_STATUS_MESSAGES.set(getattr(self, 'status_messages', None))
                 try:
                     return _orig(self, prompt, prompt_id, *args, **kwargs)
                 finally:
+                    _ACTIVE_STATUS_MESSAGES.reset(msgs_tok)
                     _exit_log_frame(frame_nonce, pid_tok)
                     _IN_LOG_FRAME.reset(tok)
             setattr(executor_cls, method_name, _wrapped_sync)
@@ -464,7 +494,7 @@ class ServerHook(importlib.abc.MetaPathFinder):
 
             spec.loader = Loader()
             return spec
-        if fullname == 'execution' and self.frame_nonce and (self.root / 'execution.py').is_file():
+        if fullname == 'execution' and (self.root / 'execution.py').is_file():
             spec = importlib.machinery.PathFinder.find_spec(fullname, [str(self.root)])
             if spec is None or Path(spec.origin).resolve() != self.root / 'execution.py':
                 return None

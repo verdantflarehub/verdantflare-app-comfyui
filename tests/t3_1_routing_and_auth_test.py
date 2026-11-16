@@ -866,6 +866,45 @@ class T31RoutingAndAuthTest(unittest.TestCase):
             headless_unmanaged.call('comfyui-api', foreign_principal, 'model.catalog', {'project_id': self.project_a})
         self.assertEqual((ctx_foreign.exception.code, ctx_foreign.exception.status), ('NOT_FOUND', 404))
 
+    def test_per_node_timing_framing_and_header_url_canary_audit(self):
+        import types
+        from app.diagnostics import extract_execution_trace_from_history
+        from app.models import LocalModelProvisioner
+        from worker.launch import install_execution_framing
+
+        mod = types.ModuleType('fake_execution')
+
+        def fake_get_output_data(prompt_id, unique_id, obj, *args, **kwargs):
+            return (['ok'], [], False, False)
+
+        class FakeExecutor:
+            def __init__(self):
+                self.status_messages = []
+
+            def execute(self, prompt, prompt_id, *args, **kwargs):
+                self.status_messages.append(['execution_start', {'prompt_id': prompt_id, 'timestamp': 1000.0}])
+                mod.get_output_data(prompt_id, '4', object())
+                self.status_messages.append(['execution_success', {'prompt_id': prompt_id, 'timestamp': 1050.0}])
+
+        mod.get_output_data = fake_get_output_data
+        mod.PromptExecutor = FakeExecutor
+        install_execution_framing(mod, '')
+        ex = FakeExecutor()
+        ex.execute({}, 'pid-node-time-1')
+        trace = extract_execution_trace_from_history({'status': {'messages': ex.status_messages}}, prompt_id='pid-node-time-1')
+        self.assertEqual([nt['node_id'] for nt in trace['node_timings']], ['4'])
+        self.assertGreaterEqual(trace['node_timings'][0]['duration_ms'], 0.0)
+
+        # Verify SSRF URL query canary redaction in MODEL_SOURCE_SSRF_BLOCKED details
+        mp = LocalModelProvisioner(Path(self.temp.name) / 'models_ssrf_audit')
+        canary_tok = 'vf_canary_' + uuid.uuid4().hex
+        with self.assertRaises(Error) as ctx_ssrf:
+            mp._validate_url_ssrf(f'https://127.0.0.1/secret.safetensors?companion=COMP_CH3&api_key={canary_tok}')
+        self.assertEqual(ctx_ssrf.exception.code, 'MODEL_SOURCE_SSRF_BLOCKED')
+        self.assertIn('COMP_CH3', ctx_ssrf.exception.details.get('url_audit', ''))
+        self.assertIn('[REDACTED]', ctx_ssrf.exception.details.get('url_audit', ''))
+        self.assertNotIn(canary_tok, json.dumps(ctx_ssrf.exception.payload()))
+
 
 if __name__ == '__main__':
     unittest.main()
