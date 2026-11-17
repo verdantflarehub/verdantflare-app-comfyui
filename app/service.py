@@ -123,6 +123,85 @@ TASK_ERROR_STATUS = {
 
 DEFAULT_WORKER_IMAGE_DIGEST = 'sha256:' + '0' * 64
 VALID_WORKER_IMAGE_DIGEST_RE = re.compile(r'^sha256:(?!0{64})[0-9a-f]{64}\Z')
+PINNED_WORKER_IMAGE_DIGEST_REF_RE = re.compile(
+    r'^[a-z0-9][a-z0-9./:_-]*@(sha256:(?!0{64})[0-9a-f]{64})\Z'
+)
+
+
+def normalize_repo_digest(raw) -> str | None:
+    """Normalize a canonical repo digest (`sha256:<64hex>` lowercase); reject mutable tags and zero digests."""
+    if not isinstance(raw, str):
+        return None
+    cand = raw.strip().lower()
+    if not cand:
+        return None
+    if VALID_WORKER_IMAGE_DIGEST_RE.fullmatch(cand):
+        return cand
+    pinned = PINNED_WORKER_IMAGE_DIGEST_REF_RE.fullmatch(cand)
+    if pinned:
+        return pinned.group(1)
+    return None
+
+
+def resolve_headless_executor_digest_state(
+    *,
+    headless_runner=None,
+    fallback_worker_image_digest=None,
+) -> tuple[str | None, bool]:
+    """Return `(canonical_executor_digest, runner_config_mismatch)` without mutating runner state."""
+    if headless_runner is None or not getattr(headless_runner, 'is_configured', False):
+        return None, False
+    fallback = None if getattr(headless_runner, 'worker_client', None) is not None else fallback_worker_image_digest
+    try:
+        raw_exec_digest, _observed_boot = headless_runner.resolve_worker_binding(fallback=fallback)
+    except Error as exc:
+        if exc.code == 'WORKER_IMAGE_DIGEST_MISMATCH':
+            live_digest = normalize_repo_digest((exc.details or {}).get('worker_image_digest'))
+            return live_digest, True
+        return None, False
+    except Exception:
+        return None, False
+    return normalize_repo_digest(raw_exec_digest), False
+
+
+def evaluate_published_workflow_digest_compatibility(
+    published_digest,
+    *,
+    current_exec_digest: str | None,
+    runner_config_mismatch: bool = False,
+) -> dict:
+    pub_norm = normalize_repo_digest(published_digest)
+    if runner_config_mismatch:
+        return {
+            'available': False,
+            'digest_compatible': False,
+            'reason': 'worker_image_digest_mismatch',
+            'worker_image_digest': pub_norm,
+            'current_worker_image_digest': current_exec_digest,
+        }
+    if pub_norm is None or current_exec_digest is None:
+        return {
+            'available': False,
+            'digest_compatible': 'unknown',
+            'reason': 'worker_image_digest_unknown',
+            'worker_image_digest': pub_norm,
+            'current_worker_image_digest': current_exec_digest,
+        }
+    if pub_norm != current_exec_digest:
+        return {
+            'available': False,
+            'digest_compatible': False,
+            'reason': 'worker_image_digest_mismatch',
+            'worker_image_digest': pub_norm,
+            'current_worker_image_digest': current_exec_digest,
+        }
+    return {
+        'available': True,
+        'digest_compatible': True,
+        'reason': None,
+        'worker_image_digest': pub_norm,
+        'current_worker_image_digest': current_exec_digest,
+    }
 
 
 def _require_valid_worker_image_digest(

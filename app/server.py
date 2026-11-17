@@ -8,7 +8,14 @@ import socket
 import sqlite3
 
 from .protocol import Error, ProjectAccess, authenticate, decode, encode, token_valid, valid_id
-from .service import Application, CONTRACT, HEADLESS_ALIAS, HeadlessAPIService
+from .service import (
+    Application,
+    CONTRACT,
+    HEADLESS_ALIAS,
+    HeadlessAPIService,
+    evaluate_published_workflow_digest_compatibility,
+    resolve_headless_executor_digest_state,
+)
 from .task_store import Principal, TaskStore
 from .workflow import WorkflowPolicy
 
@@ -166,12 +173,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if channel is not None and channel not in ('image', 'video'):
                     raise Error('INVALID_BODY', 400)
                 manager = getattr(self.server, 'manager', None)
-                store = manager.store if manager is not None else (self.server.app.store if self.server.app is not None else None)
+                app_inst = getattr(self.server, 'app', None)
+                store = manager.store if manager is not None else (app_inst.store if app_inst is not None else None)
                 if store is None:
                     raise Error('NOT_FOUND', 404)
+                if manager is not None:
+                    headless_runner = getattr(manager, 'headless_runner', None)
+                    fallback_digest = (
+                        getattr(headless_runner, 'worker_image_digest', None)
+                        or os.environ.get('COMFYUI_WORKER_IMAGE_DIGEST')
+                        or None
+                    )
+                else:
+                    headless_runner = getattr(app_inst, 'headless_runner', None)
+                    fallback_digest = (
+                        getattr(headless_runner, 'worker_image_digest', None)
+                        or getattr(app_inst, 'image_digest', None)
+                        or os.environ.get('COMFYUI_WORKER_IMAGE_DIGEST')
+                        or None
+                    )
+                current_exec_digest, runner_mismatch = resolve_headless_executor_digest_state(
+                    headless_runner=headless_runner,
+                    fallback_worker_image_digest=fallback_digest,
+                )
                 items = store.list_mounted_channel_apis(organization_id=org_id, mount_channel=channel)
-                return self.reply(200, {
-                    'items': [
+                projected_items = []
+                for it in items:
+                    compat = evaluate_published_workflow_digest_compatibility(
+                        it.get('worker_image_digest'),
+                        current_exec_digest=current_exec_digest,
+                        runner_config_mismatch=runner_mismatch,
+                    )
+                    projected_items.append(
                         {
                             'published_api_id': it['id'],
                             'catalog_model_id': f"comfyui:{it['endpoint_slug']}@{it['version']}",
@@ -188,11 +221,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             'seed_policy': it['seed_policy'],
                             'vram_budget_mib': int(it['vram_budget_mib']),
                             'source_badge': '本地',
+                            'worker_image_digest': compat['worker_image_digest'],
+                            'current_worker_image_digest': compat['current_worker_image_digest'],
+                            'available': compat['available'],
+                            'digest_compatible': compat['digest_compatible'],
+                            'reason': compat['reason'],
                             'spec': it['spec'],
                         }
-                        for it in items
-                    ]
-                })
+                    )
+                return self.reply(
+                    200,
+                    {
+                        'current_worker_image_digest': current_exec_digest,
+                        'items': projected_items,
+                    },
+                )
             principal = authenticate(self.headers, self.server.token)
             manager = getattr(self.server, 'manager', None)
             if self.path == '/internal/dashboard/instances':

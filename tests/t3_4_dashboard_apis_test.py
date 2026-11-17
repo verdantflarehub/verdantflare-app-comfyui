@@ -443,16 +443,22 @@ class T34DashboardApisTest(unittest.TestCase):
                 self.assertEqual(bad_ch_code, 400)
                 self.assertEqual(bad_ch['code'], 'INVALID_BODY')
 
-            # 6. Published channels endpoint projects comfyui:sdxl-lora-img2img@1.0.0 with source_badge="本地"
+            # 6. Published channels endpoint projects comfyui:sdxl-lora-img2img@1.0.0 with source_badge="本地" and compatible digest
             ch_code, ch_payload = self._http(
                 'POST',
                 '/internal/v1/comfyui/published-channels',
                 {'organization_id': ORG, 'mount_channel': 'image'},
             )
             self.assertEqual(ch_code, 200)
+            self.assertEqual(ch_payload['current_worker_image_digest'], WORKER_DIGEST)
             self.assertEqual(len(ch_payload['items']), 1)
             self.assertEqual(ch_payload['items'][0]['catalog_model_id'], 'comfyui:sdxl-lora-img2img@1.0.0')
             self.assertEqual(ch_payload['items'][0]['source_badge'], '本地')
+            self.assertTrue(ch_payload['items'][0]['available'])
+            self.assertIs(ch_payload['items'][0]['digest_compatible'], True)
+            self.assertIsNone(ch_payload['items'][0]['reason'])
+            self.assertEqual(ch_payload['items'][0]['worker_image_digest'], WORKER_DIGEST)
+            self.assertEqual(ch_payload['items'][0]['current_worker_image_digest'], WORKER_DIGEST)
 
             # 7. Simulate an in-flight task_execution model pin and verify unpublish keeps it intact while releasing published_api pin!
             sdxl_sha = spec['model_dependencies'][0]['sha256']
@@ -771,6 +777,112 @@ class T34DashboardApisTest(unittest.TestCase):
         reconciled_view = self.store.inspect(rec_task_id)
         self.assertEqual(reconciled_view['state'], 'failed')
         self.assertEqual(reconciled_view['error'], 'HEADLESS_QUARANTINE_RECONCILED')
+
+    def test_published_channels_digest_mismatch_unknown_and_strict_invoke_409(self):
+        self_outer = self
+        upgraded_digest = 'sha256:' + 'b' * 64
+
+        class _FakeWorkerNative:
+            def __init__(self, _proof):
+                pass
+
+            def gpu_state(self, _instance_id=None):
+                return dict(self_outer.gpu_state_payload)
+
+            def runtime_spec(self, _instance_id=None):
+                return {'image_digest': WORKER_DIGEST}
+
+            def object_info_cached(self, _instance_id=None):
+                return {'object_info': None}
+
+        with patch('app.runtime.BoundNativeClient', _FakeWorkerNative):
+            self._seed_golden_draft_and_smoke()
+            _, ext_payload = self._http(
+                'POST',
+                '/internal/dashboard/workflow-apis/extract',
+                {
+                    'instance_id': self.instance_id,
+                    'endpoint_slug': 'sdxl-lora-img2img',
+                    'version': '1.0.8',
+                    'display_name': 'SDXL Digest Gate',
+                    'output_modality': 'image',
+                },
+            )
+            _, apis_before = self._http('GET', '/internal/dashboard/workflow-apis')
+            smoke_task_id = apis_before['smoke_candidates'][0]['smoke_task_id']
+            pub_code, _ = self._http(
+                'POST',
+                '/internal/dashboard/workflow-apis/publish',
+                {
+                    'instance_id': self.instance_id,
+                    'smoke_task_id': smoke_task_id,
+                    'mount_channel': 'image',
+                    'idempotency_key': request_id(),
+                    'spec': ext_payload['spec'],
+                },
+            )
+            self.assertEqual(pub_code, 201)
+
+        # 1. Headless worker upgrades to a new canonical repo digest -> 1.0.8 RETAINED with available=False & mismatch reason
+        self.headless_runner.worker_image_digest = upgraded_digest
+        ch_code, ch_mismatch = self._http(
+            'POST',
+            '/internal/v1/comfyui/published-channels',
+            {'organization_id': ORG, 'mount_channel': 'image'},
+        )
+        self.assertEqual(ch_code, 200)
+        self.assertEqual(ch_mismatch['current_worker_image_digest'], upgraded_digest)
+        self.assertEqual(len(ch_mismatch['items']), 1)
+        item_mismatch = ch_mismatch['items'][0]
+        self.assertEqual(item_mismatch['catalog_model_id'], 'comfyui:sdxl-lora-img2img@1.0.8')
+        self.assertFalse(item_mismatch['available'])
+        self.assertIs(item_mismatch['digest_compatible'], False)
+        self.assertEqual(item_mismatch['reason'], 'worker_image_digest_mismatch')
+        self.assertEqual(item_mismatch['worker_image_digest'], WORKER_DIGEST)
+        self.assertEqual(item_mismatch['current_worker_image_digest'], upgraded_digest)
+
+        # Strict execution gate at api.invoke MUST remain 409 WORKER_IMAGE_DIGEST_MISMATCH
+        ref_in = self.artifact_store.seed_artifact(
+            ORG,
+            PROJECT_A,
+            ADMIN_ID,
+            data=make_png_bytes(512, 512),
+            mime_type='image/png',
+            filename='in_512.png',
+        )
+        inv_code, inv_err = self._mcp_call(
+            'comfyui-api',
+            'api.invoke',
+            {
+                'project_id': PROJECT_A,
+                'idempotency_key': 'idem-strict-mismatch-108',
+                'endpoint_slug': 'sdxl-lora-img2img',
+                'version': '1.0.8',
+                'params': {
+                    'prompt': 'test strict gate',
+                    'ref_image': ref_in['artifact_id'],
+                },
+            },
+        )
+        self.assertEqual(inv_code, 409)
+        self.assertEqual(inv_err['code'], 'WORKER_IMAGE_DIGEST_MISMATCH')
+
+        # 2. Mutable tag or unconfigured runner -> fail-closed with digest_compatible="unknown", available=False
+        for bad_digest in ('registry.cn-qingdao.aliyuncs.com/wod/verdantflare-app:comfyui-worker-v0.1.25', ''):
+            self.headless_runner.worker_image_digest = None
+            with patch.dict(os.environ, {'COMFYUI_WORKER_IMAGE_DIGEST': bad_digest}, clear=False):
+                u_code, u_payload = self._http(
+                    'POST',
+                    '/internal/v1/comfyui/published-channels',
+                    {'organization_id': ORG, 'mount_channel': 'image'},
+                )
+            self.assertEqual(u_code, 200)
+            self.assertIsNone(u_payload['current_worker_image_digest'])
+            self.assertEqual(len(u_payload['items']), 1)
+            u_item = u_payload['items'][0]
+            self.assertFalse(u_item['available'])
+            self.assertEqual(u_item['digest_compatible'], 'unknown')
+            self.assertEqual(u_item['reason'], 'worker_image_digest_unknown')
 
 
 if __name__ == '__main__':
